@@ -9,6 +9,8 @@
 # it is found as usual. The PC must accept TCP 28771 from the Switch for the log (nxlink -s); the
 # netloader's own transfer goes the other way, to the Switch's port 28280.
 # Each run's log is also kept in logs/switch/nxlink_<date>.log.
+# The game's arguments go through nxlink's --args: placed after the file, nxlink's getopt takes any
+# --option as its own, says "unrecognized option" and the game never sees it.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -44,5 +46,5 @@ echo "sending $NRO -> sdmc:/switch/$DEST ($SWITCH_IP); log: $LOG"
 # stdbuf -oL: nxlink's stdout is a pipe here, so glibc would hold the game's log in 4 KB blocks and a
 # hang would look like it happened earlier than it did (first Switch run: 1 min "stuck" mid-line).
 podman run --rm -i --network host -v "$(dirname "$NRO"):/nro:ro,Z" "$IMAGE" \
-  stdbuf -oL -eL /opt/devkitpro/tools/bin/nxlink -s -a "$SWITCH_IP" -p "$DEST" "/nro/$(basename "$NRO")" "$@" \
+  stdbuf -oL -eL /opt/devkitpro/tools/bin/nxlink -s -a "$SWITCH_IP" -p "$DEST" ${*:+--args "$*"} "/nro/$(basename "$NRO")" \
   2>&1 | tee "$LOG"

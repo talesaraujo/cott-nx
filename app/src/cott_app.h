@@ -82,6 +82,11 @@ class CottApp : public rex::ReXApp {
   void OnPostInitLogging() override {
     // Without a GPU plugin the game runs but every graphics call is discarded: black screen.
     SetIfNotRequested("gpu_plugin", "xenos");
+    // Render targets through fragment shader interlock (RADV on the PC, NVK on the Tegra X1). With
+    // the default host render target path (FBO) the Switch never shows a frame: the first runs stopped
+    // after 8 pipelines with a black screen, no sound and a sluggish HOME menu (GPU stuck). On the PC
+    // FBO reaches the title but goes black after it. 2026-10-16, Switch runs 1-6.
+    SetIfNotRequested("render_target_path_vulkan", "fsi");
 #if !REX_PLATFORM_SWITCH
     // Keyboard and mouse as a controller on PC. Not on the Switch: it would shadow the libnx pads.
     SetIfNotRequested("mnk_mode", "true");
