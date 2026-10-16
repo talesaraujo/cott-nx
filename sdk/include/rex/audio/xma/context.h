@@ -248,7 +248,8 @@ class XmaContext {
   }
 
  private:
-  static void SwapInputBuffer(XMA_CONTEXT_DATA* data);
+  void SwapInputBuffer(XMA_CONTEXT_DATA* data);
+  void LearnStreamIndex(const XMA_CONTEXT_DATA* data);
   static int GetSampleRate(int id);
   static int16_t GetPacketNumber(size_t size, size_t bit_offset);
   static uint32_t GetCurrentInputBufferSize(XMA_CONTEXT_DATA* data);
@@ -313,6 +314,10 @@ class XmaContext {
   // Loop subframe precision state
   uint8_t loop_frame_output_limit_ = 0;
   bool loop_start_skip_pending_ = false;
+
+  // COTT: which stream of a multi-stream sound this context decodes (see LearnStreamIndex).
+  uint32_t stream_index_ = 0;
+  bool stream_index_valid_ = false;
 
 };
 

@@ -535,6 +535,8 @@ void XmaContext::ResetDecoderState() {
   current_frame_remaining_subframes_ = 0;
   loop_frame_output_limit_ = 0;
   loop_start_skip_pending_ = false;
+  stream_index_ = 0;
+  stream_index_valid_ = false;
 }
 
 void XmaContext::Disable() {
@@ -553,13 +555,67 @@ void XmaContext::Release() {
 }
 
 void XmaContext::SwapInputBuffer(XMA_CONTEXT_DATA* data) {
+  LearnStreamIndex(data);
   if (data->current_buffer == 0) {
     data->input_buffer_0_valid = 0;
   } else {
     data->input_buffer_1_valid = 0;
   }
   data->current_buffer ^= 1;
-  data->input_buffer_read_offset = kBitsPerPacketHeader;
+  // COTT: a multi-stream sound restarts at its own stream's packet in every block (XMA2 blocks
+  // begin with one packet per stream, in stream order), not at packet 0. Decode moves from the
+  // packet header to that packet's first frame. Single-stream sounds keep packet 0.
+  data->input_buffer_read_offset =
+      (stream_index_valid_ ? stream_index_ * kBitsPerPacket : 0) + kBitsPerPacketHeader;
+}
+
+// COTT: learns which stream of a multi-stream XMA sound this context decodes.
+//
+// A 5.1 XMA sound is three stereo streams (front, centre + LFE, rear), one hardware context
+// each, with their 2 KB packets interleaved in shared blocks. Crash of the Titans hands each
+// context a first input buffer that starts at ITS stream's first packet of the current block
+// and ends exactly where the next block (its other input buffer) begins:
+//   stream 0: base + 0 packets, 32 packets      next buffer: next block base, 32 packets
+//   stream 1: base + 1 packet,  31 packets
+//   stream 2: base + 2 packets, 30 packets
+// The offset from the block base is the stream index. Restarting every stream at packet 0 of
+// the next block made streams 1 and 2 decode stream 0's packets: the cutscene dialogue, which
+// is in the centre channel (stream 1), was silent while music and effects played.
+// Found by MojoRecomp (runtime/audio/xma_decoder.cpp, LearnXmaBlockStreamIndex); this is the
+// same rule in this decoder.
+void XmaContext::LearnStreamIndex(const XMA_CONTEXT_DATA* data) {
+  if (stream_index_valid_) {
+    return;
+  }
+  const uint8_t current = data->current_buffer;
+  const uint8_t next = current ^ 1;
+  if (!data->IsInputBufferValid(current) || !data->IsInputBufferValid(next)) {
+    return;
+  }
+  const uint64_t current_ptr = data->GetInputBufferAddress(current);
+  const uint64_t next_ptr = data->GetInputBufferAddress(next);
+  const uint64_t current_count = data->GetInputBufferPacketCount(current);
+  const uint64_t next_count = data->GetInputBufferPacketCount(next);
+  if (!current_ptr || !next_ptr || !current_count || !next_count || next_ptr <= current_ptr) {
+    return;
+  }
+  const uint64_t next_block_bytes = next_count * kBytesPerPacket;
+  if (next_ptr < next_block_bytes) {
+    return;
+  }
+  const uint64_t block_base = next_ptr - next_block_bytes;
+  if (current_ptr < block_base || current_ptr + current_count * kBytesPerPacket != next_ptr) {
+    return;
+  }
+  const uint64_t phase = current_ptr - block_base;
+  if (phase % kBytesPerPacket != 0 || phase / kBytesPerPacket >= next_count) {
+    return;
+  }
+  stream_index_ = static_cast<uint32_t>(phase / kBytesPerPacket);
+  stream_index_valid_ = true;
+  REXAPU_INFO("XmaContext {}: multi-stream input, stream {} (buffer {:08X}, {} packets, next {:08X})",
+              id(), stream_index_, static_cast<uint32_t>(current_ptr),
+              static_cast<uint32_t>(current_count), static_cast<uint32_t>(next_ptr));
 }
 
 void XmaContext::UpdateLoopStatus(XMA_CONTEXT_DATA* data) {
@@ -660,6 +716,17 @@ void XmaContext::AdvanceInputPacket(XMA_CONTEXT_DATA* data, uint32_t next_packet
   // crossing them and search after packets with no new frames.
   for (unsigned buffer = 0; buffer < 2; ++buffer) {
     if (!data->IsCurrentInputBufferValid()) {
+      // COTT: the stream continues in a buffer the game has not filled yet. Keep the
+      // carried packet in the read offset (SwapInputBuffer reset it to packet 0), and Decode
+      // moves to that packet's first frame once the buffer is valid. In a multi-stream sound
+      // (5.1 XMA = three stereo streams, one context each, packets interleaved, every buffer
+      // starting with one packet per stream) stream 1 continues at packet 1 of the next
+      // buffer, not 0; restarting at 0 made the centre channel play stream 0's packets, and
+      // the cutscene dialogue (centre channel) went silent. Same bug as Mind over Recomp's
+      // patch 0007 (findings/19). Single-stream sounds carry 0, as before.
+      if (!stream_index_valid_ && buffer > 0 && next_packet_index > 0) {
+        data->input_buffer_read_offset = next_packet_index * kBitsPerPacket + kBitsPerPacketHeader;
+      }
       return;
     }
     const uint32_t count = data->GetCurrentInputBufferPacketCount();
@@ -679,6 +746,9 @@ void XmaContext::AdvanceInputPacket(XMA_CONTEXT_DATA* data, uint32_t next_packet
       next_packet_index -= count;
     }
     SwapInputBuffer(data);
+    if (stream_index_valid_) {
+      next_packet_index = stream_index_;  // see SwapInputBuffer
+    }
   }
 }
 
@@ -908,6 +978,8 @@ bool XmaContext::DecodePacket(AVCodecContext* av_context, const AVPacket* av_pac
 
 void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
   SCOPE_profile_cpu_f("apu");
+
+  LearnStreamIndex(data);
 
   if (!data->IsAnyInputBufferValid()) {
     return;
