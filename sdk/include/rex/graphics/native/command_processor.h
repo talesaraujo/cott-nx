@@ -8,10 +8,12 @@
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <array>
 
 #include <rex/graphics/command_processor.h>
+#include <rex/graphics/native/targets.h>
 #include <rex/graphics/pipeline/shader/shader.h>
 #include <rex/ui/vulkan/api.h>
 
@@ -54,6 +56,14 @@ class NativeCommandProcessor : public CommandProcessor {
   static constexpr size_t kFrameSlots = 3;
   std::array<FrameSlot, kFrameSlots> slots_{};
   size_t slot_index_ = 0;
+
+  // The command buffer of the frame being recorded: opened by the first resolve or draw after a swap,
+  // submitted by the swap.
+  VkCommandBuffer frame_command_buffer_ = VK_NULL_HANDLE;
+  VkCommandBuffer EnsureFrame();
+  void SubmitFrame();
+
+  NativeTargets targets_;
 
   bool CreateFrameSlots();
   void DestroyFrameSlots();

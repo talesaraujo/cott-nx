@@ -55,6 +55,7 @@ set(REXGPU_XENOS_VULKAN_SOURCES
     # COTT: the native renderer (Phase 3), selected with gpu_backend=native.
     native/graphics_system.cpp
     native/command_processor.cpp
+    native/targets.cpp
 )
 
 # D3D12 backend

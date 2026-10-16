@@ -10,6 +10,7 @@
 #include <rex/graphics/graphics_system.h>
 #include <rex/graphics/register_file.h>
 #include <rex/graphics/registers.h>
+#include <rex/graphics/util/draw.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
 #include <rex/ui/presenter.h>
@@ -18,7 +19,14 @@
 #include <rex/ui/vulkan/provider.h>
 #include <rex/ui/vulkan/util.h>
 
+#include <algorithm>
 #include <cmath>
+
+#include <rex/cvar.h>
+
+REXCVAR_DEFINE_BOOL(native_present_last_resolve, false, "GPU/Native",
+                    "Show the destination of the latest color resolve instead of the front buffer "
+                    "(debugging the render targets before draws work)");
 
 #if REX_PLATFORM_SWITCH
 // Game FPS for the console profiler (switch_perf.cpp): one count per guest present, as in the emulation.
@@ -42,12 +50,12 @@ bool NativeCommandProcessor::SetupContext() {
     REXGPU_ERROR("[native] base command processor context failed");
     return false;
   }
-  if (!CreateFrameSlots()) {
+  if (!CreateFrameSlots() || !targets_.Initialize(vulkan_device())) {
     return false;
   }
   report_start_ = std::chrono::steady_clock::now();
-  REXGPU_INFO("[native] native renderer, milestone M3a: draws and copies are dropped, each swap "
-              "presents a test color");
+  REXGPU_INFO("[native] native renderer, milestone M3b: render targets and resolves, draws "
+              "dropped");
   return true;
 }
 
@@ -145,8 +153,24 @@ bool NativeCommandProcessor::SubmitSlot() {
   return true;
 }
 
+VkCommandBuffer NativeCommandProcessor::EnsureFrame() {
+  if (!frame_command_buffer_) {
+    frame_command_buffer_ = BeginSlot();
+  }
+  return frame_command_buffer_;
+}
+
+void NativeCommandProcessor::SubmitFrame() {
+  if (frame_command_buffer_) {
+    SubmitSlot();
+    frame_command_buffer_ = VK_NULL_HANDLE;
+  }
+}
+
 void NativeCommandProcessor::ShutdownContext() {
+  SubmitFrame();
   DestroyFrameSlots();
+  targets_.Shutdown();
   REXGPU_INFO("[native] {} draws, {} copies and {} swaps in total; {} distinct shaders", draws_,
               copies_, swaps_, shaders_.size());
   shaders_.clear();
@@ -183,6 +207,7 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType /*prim_type*/, uint3
 
 bool NativeCommandProcessor::IssueCopy() {
   ++copies_;
+  targets_.Resolve(EnsureFrame(), *register_file_, *memory_);
   return true;
 }
 
@@ -193,23 +218,26 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
 #endif
   ++swaps_;
 
-  // M3a: proves the path to the screen. The presenter hands over its guest output image; it is cleared
-  // to a color that cycles slowly with the swap count and goes back to the layout the presenter samples
-  // it in. The work is submitted before the refresher returns: the presenter paints right after it, on
-  // this thread ("presentando en el acto"), and both use graphics queue 0, so queue order is enough.
+  // The image the game shows is the resolve destination at the front buffer address. The presenter
+  // hands over its guest output image; the frame's commands and the blit into it are submitted before
+  // the refresher returns, because the presenter paints right after it, on this thread ("presentando en
+  // el acto"), on the same queue. Without a known front buffer (the very first frames), a test color.
+  NativeImage* source = REXCVAR_GET(native_present_last_resolve)
+                            ? targets_.last_color_destination()
+                            : targets_.FindTexture(frontbuffer_ptr);
   if (ui::Presenter* presenter = graphics_system_ ? graphics_system_->presenter() : nullptr) {
     const uint32_t width = frontbuffer_width ? frontbuffer_width : 1280;
     const uint32_t height = frontbuffer_height ? frontbuffer_height : 720;
     presenter->RefreshGuestOutput(
-        width, height, 1280, 720, [this](ui::Presenter::GuestOutputRefreshContext& context) -> bool {
+        width, height, 1280, 720,
+        [this, source, width, height](ui::Presenter::GuestOutputRefreshContext& context) -> bool {
           auto& vk_context =
               static_cast<ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext&>(context);
           const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device()->functions();
-          VkCommandBuffer cb = BeginSlot();
+          VkCommandBuffer cb = EnsureFrame();
           const VkImageSubresourceRange range = ui::vulkan::util::InitializeSubresourceRange();
 
           VkImageMemoryBarrier barrier = {};
-
           barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
           barrier.srcAccessMask = vk_context.image_ever_written_previously()
                                       ? ui::vulkan::VulkanPresenter::kGuestOutputInternalAccessMask
@@ -229,14 +257,27 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                                    &barrier);
 
-          const float t = float(swaps_ % 360) * (6.2831853f / 360.0f);
-          VkClearColorValue color{};
-          color.float32[0] = 0.5f + 0.5f * std::sin(t);
-          color.float32[1] = 0.5f + 0.5f * std::sin(t + 2.094f);
-          color.float32[2] = 0.5f + 0.5f * std::sin(t + 4.189f);
-          color.float32[3] = 1.0f;
-          dfn.vkCmdClearColorImage(cb, vk_context.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                   &color, 1, &range);
+          if (source) {
+            targets_.Transition(cb, *source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            VkImageBlit blit = {};
+            blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            blit.srcOffsets[1] = {int32_t(std::min(width, source->width)),
+                                  int32_t(std::min(height, source->height)), 1};
+            blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            blit.dstOffsets[1] = {int32_t(width), int32_t(height), 1};
+            dfn.vkCmdBlitImage(cb, source->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               vk_context.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                               VK_FILTER_NEAREST);
+          } else {
+            const float t = float(swaps_ % 360) * (6.2831853f / 360.0f);
+            VkClearColorValue color = {};
+            color.float32[0] = 0.5f + 0.5f * std::sin(t);
+            color.float32[1] = 0.5f + 0.5f * std::sin(t + 2.094f);
+            color.float32[2] = 0.5f + 0.5f * std::sin(t + 4.189f);
+            color.float32[3] = 1.0f;
+            dfn.vkCmdClearColorImage(cb, vk_context.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     &color, 1, &range);
+          }
 
           barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
           barrier.dstAccessMask = ui::vulkan::VulkanPresenter::kGuestOutputInternalAccessMask;
@@ -246,18 +287,22 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                                    ui::vulkan::VulkanPresenter::kGuestOutputInternalStageMask, 0, 0,
                                    nullptr, 0, nullptr, 1, &barrier);
           context.SetIs8bpc(true);
-          return SubmitSlot();
+          SubmitFrame();
+          return true;
         });
   }
+  // Not painted (no presenter, minimized window): the frame's work still has to go.
+  SubmitFrame();
+
   const auto now = std::chrono::steady_clock::now();
   if (now - report_start_ >= kReportInterval) {
     const double seconds = std::chrono::duration<double>(now - report_start_).count();
     const uint64_t swaps = swaps_ - report_swaps_;
-    REXGPU_INFO("[native] {:.1f} swaps/s, {:.0f} draws and {:.1f} copies per frame, {} shaders "
-                "(front buffer {:08X} {}x{})",
+    REXGPU_INFO("[native] {:.1f} swaps/s, {:.0f} draws and {:.1f} copies per frame, {} shaders, "
+                "{} resolves done and {} skipped in total (front buffer {:08X} {}x{})",
                 swaps / seconds, swaps ? double(draws_ - report_draws_) / swaps : 0.0,
                 swaps ? double(copies_ - report_copies_) / swaps : 0.0, shaders_.size(),
-                frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+                targets_.resolves(), targets_.skipped(), frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
     report_start_ = now;
     report_draws_ = draws_;
     report_copies_ = copies_;

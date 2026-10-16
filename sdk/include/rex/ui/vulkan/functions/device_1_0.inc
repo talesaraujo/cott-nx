@@ -10,10 +10,16 @@ XE_UI_VULKAN_FUNCTION(vkCmdBindDescriptorSets)
 XE_UI_VULKAN_FUNCTION(vkCmdBindIndexBuffer)
 XE_UI_VULKAN_FUNCTION(vkCmdBindPipeline)
 XE_UI_VULKAN_FUNCTION(vkCmdBindVertexBuffers)
+// COTT: the native renderer (sdk/src/graphics/native).
+XE_UI_VULKAN_FUNCTION(vkCmdBlitImage)
 XE_UI_VULKAN_FUNCTION(vkCmdClearAttachments)
 XE_UI_VULKAN_FUNCTION(vkCmdClearColorImage)
+// COTT: the native renderer.
+XE_UI_VULKAN_FUNCTION(vkCmdClearDepthStencilImage)
 XE_UI_VULKAN_FUNCTION(vkCmdCopyBuffer)
 XE_UI_VULKAN_FUNCTION(vkCmdCopyBufferToImage)
+// COTT: the native renderer.
+XE_UI_VULKAN_FUNCTION(vkCmdCopyImage)
 XE_UI_VULKAN_FUNCTION(vkCmdCopyImageToBuffer)
 XE_UI_VULKAN_FUNCTION(vkCmdCopyQueryPoolResults)
 XE_UI_VULKAN_FUNCTION(vkCmdDispatch)
