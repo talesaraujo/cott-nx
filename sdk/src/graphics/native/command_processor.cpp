@@ -7,6 +7,8 @@
 #include <xxhash.h>
 
 #include <rex/graphics/flags.h>
+#include <rex/graphics/register_file.h>
+#include <rex/graphics/registers.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
 
@@ -63,6 +65,11 @@ Shader* NativeCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32
 bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType /*prim_type*/, uint32_t /*index_count*/,
                                        IndexBufferInfo* /*index_buffer_info*/,
                                        bool /*major_mode_explicit*/) {
+  // A resolve (EDRAM to memory copy) arrives as a draw with RB_MODECONTROL in copy mode, as in the
+  // emulation (VulkanCommandProcessor::IssueDraw).
+  if (register_file_->Get<reg::RB_MODECONTROL>().edram_mode == xenos::EdramMode::kCopy) {
+    return IssueCopy();
+  }
   ++draws_;
   return true;
 }
