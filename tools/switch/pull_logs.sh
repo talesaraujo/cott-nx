@@ -18,7 +18,7 @@ OUT="$ROOT/logs/switch/$(date +%Y%m%d_%H%M%S)"
 
 # Folders on the SD. logs/rex holds rex_stderr.log and the crash dumps written by switch_crash_hooks.c.
 for dir in switch/cott-nx/logs switch/cott-nx/logs/rex atmosphere/crash_reports atmosphere/fatal_reports; do
-  names=$(curl -s "${AUTH[@]}" --list-only "$BASE/$dir/" | tr -d '\r' | grep -v '/$' | grep '\.' | sort -V | tail -n "$N" || true)
+  names=$(curl -s "${AUTH[@]}" --list-only "$BASE/$dir/" | tr -d '\r' | sed 's|.*/||' | grep '\.' | sort -V | tail -n "$N" || true)
   [ -z "$names" ] && continue
   mkdir -p "$OUT/$dir"
   while read -r f; do
