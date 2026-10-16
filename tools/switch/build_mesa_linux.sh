@@ -67,10 +67,18 @@ fi
 export PATH="/usr/local/libexec:/project/builddir-native/src/compiler/clc:/project/builddir-native/src/compiler/spirv:$PATH"
 
 echo "== cross configure (Vulkan only)"
+# Build-machine tools: proc-macro crates (paste, ...) run on the host during the build, so they must be
+# compiled by the plain x86-64 rustc, not by the cross wrapper that forces the AArch64 target. This is
+# what switch_native_tools_msys2.txt does on Windows.
+# (Meson wants single quotes there; this script runs inside a single-quoted bash -lc, hence \047.)
+printf "[binaries]\nrust = [\047/root/.cargo/bin/rustc\047]\ncbindgen = \047/root/.cargo/bin/cbindgen\047\n" > /tmp/native_tools.txt
+printf "mesa_clc = \047/project/builddir-native/src/compiler/clc/mesa_clc\047\n" >> /tmp/native_tools.txt
+printf "vtn_bindgen2 = \047/project/builddir-native/src/compiler/spirv/vtn_bindgen2\047\n" >> /tmp/native_tools.txt
+cat /tmp/native_tools.txt
 setup_mode=()
-[ -f builddir-switch-vk/meson-private/coredata.dat ] && setup_mode+=(--reconfigure)
+[ -f builddir-switch-vk/meson-private/coredata.dat ] && setup_mode+=(--wipe)
 meson setup builddir-switch-vk "${setup_mode[@]}" \
-  --cross-file switch_cross_file.txt \
+  --cross-file switch_cross_file.txt --native-file /tmp/native_tools.txt \
   --default-library=static --prefix=/opt/devkitpro/portlibs/switch --libdir=lib \
   --buildtype=release -Doptimization=2 -Db_lto=false -Db_ndebug=true \
   -Dvulkan-drivers=nouveau -Dgallium-drivers= -Dgallium-rusticl=false \
