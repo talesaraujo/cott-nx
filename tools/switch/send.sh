@@ -15,12 +15,34 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 SWITCH_IP=${SWITCH_IP:?set SWITCH_IP to the address hbmenu shows after pressing Y}
 NRO=${NRO:-$ROOT/app/out/switch/cott.nro}
 IMAGE=${IMAGE:-docker.io/devkitpro/devkita64:latest}
-DEST=${DEST:-switch/cott-nx/cott.nro}
+DEST=${DEST:-cott-nx/cott.nro}  # relative to sdmc:/switch (hbmenu's root)
+
+# Wait for the netloader with nxlink's own UDP ping ("nxboot" -> "bootnx"). Never probe its TCP port:
+# hbmenu accepts a single connection, and an empty one ends the netloader with "Error getting name length".
+# The socket is bound to 28771, the port the firewall already lets in, so the reply arrives either way.
+echo "waiting for the netloader on $SWITCH_IP (hbmenu, Y)..."
+python3 -I - "$SWITCH_IP" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("", 28771))
+s.settimeout(0.5)
+while True:
+    s.sendto(b"nxboot", (sys.argv[1], 28280))
+    try:
+        data, _ = s.recvfrom(256)
+        if data.startswith(b"bootnx"):
+            break
+    except socket.timeout:
+        pass
+PY
 
 mkdir -p "$ROOT/logs/switch"
 LOG="$ROOT/logs/switch/nxlink_$(date +%Y%m%d_%H%M%S).log"
-echo "sending $NRO -> sdmc:/$DEST ($SWITCH_IP); log: $LOG"
+echo "sending $NRO -> sdmc:/switch/$DEST ($SWITCH_IP); log: $LOG"
 # --network host: nxlink -s listens on 28771 for the game's connection back to the PC.
+# stdbuf -oL: nxlink's stdout is a pipe here, so glibc would hold the game's log in 4 KB blocks and a
+# hang would look like it happened earlier than it did (first Switch run: 1 min "stuck" mid-line).
 podman run --rm -i --network host -v "$(dirname "$NRO"):/nro:ro,Z" "$IMAGE" \
-  /opt/devkitpro/tools/bin/nxlink -s -a "$SWITCH_IP" -p "$DEST" "/nro/$(basename "$NRO")" "$@" \
+  stdbuf -oL -eL /opt/devkitpro/tools/bin/nxlink -s -a "$SWITCH_IP" -p "$DEST" "/nro/$(basename "$NRO")" "$@" \
   2>&1 | tee "$LOG"
