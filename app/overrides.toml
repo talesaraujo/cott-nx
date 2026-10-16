@@ -1,0 +1,47 @@
+# ============================================================================
+#  COTT - manual declarations for the code generator
+#
+#  Included from cott_manifest.toml. Included files use the flat schema
+#  (sections at the root). Image: base 0x82000000, 6,094,848 bytes,
+#  entry point 0x82264F40.
+#
+#  Every entry says what broke, why, and how it was found.
+# ============================================================================
+
+[functions]
+
+# Two functions reached only by tail calls (a plain `b`, no link), so automatic discovery never
+# created them. First codegen run:
+#   UnresolvedCall: 0x82108F58 from 0x82109E70: b 0x82108F58 - target not in any function
+#   UnresolvedCall: 0x823FF1E8 from 0x823FD484: b 0x823FF1E8 - target not in any function
+# Sizes from MojoRecomp's function map (config/CrashOfTheTitans.toml), which starts functions at
+# both addresses.
+"0x82108F58" = { size = 0x10 }
+"0x823FF1E8" = { size = 0x8 }
+
+# XAPI fiber internals (statically linked XAPILIB, same layout as in Crash: Mind over Mutant).
+# The analyzer does not know that the call at 0x823E9C0C never returns, so it merged the
+# fiber-start trampoline with the SwitchToFiber body that follows it (one 0x41C-byte function),
+# and the thunk at 0x823E8D70 (`b 0x823E9C10`) then pointed into the middle of a function:
+#   Unresolved b target 0x823E9C10 from 0x823E8D70
+# 0x823E9C10 reads thread = *(r13+0x100) and fiber = *(thread+0x164), then saves r1, r14-r31,
+# CR, LR, FPSCR, f14-f31 and the VMX registers: a full context switch. See [rexcrt] below.
+"0x823E9C00" = { name = "XapiFiberStartTrampoline", size = 0x10 }
+"0x823E9C10" = { name = "XapiSwitchToFiberBody", size = 0x40C }
+
+# ----------------------------------------------------------------------------
+#  ReXCRT - guest CRT / XAPI functions replaced by the SDK's native versions.
+# ----------------------------------------------------------------------------
+[rexcrt]
+
+# FIBERS. The game runs cooperative tasks on fibers. A fiber switch swaps the whole CPU state,
+# stack pointer included, which recompiled C++ cannot do by itself: each guest fiber also needs
+# its own host stack. The SDK runs every guest fiber on a real host fiber (ucontext on Linux,
+# hand-written aarch64 switch on Horizon, sdk/src/core/fiber_*.cpp).
+# Identified 2026-10-16 from the generated code, by the same signatures as in Mind over Recomp
+# (docs/findings/02): thread = *(r13+0x100), thread->fiber = *(thread+0x164).
+ConvertThreadToFiber = 0x823E8B50  # SetLastError(0x500 ERROR_ALREADY_FIBER)
+ConvertFiberToThread = 0x823E8BE0  # SetLastError(0x501 ERROR_ALREADY_THREAD), clears thread+0x164
+CreateFiber          = 0x823E8C30
+DeleteFiber          = 0x823E8D10
+SwitchToFiber        = 0x823E8D70  # thunk: b XapiSwitchToFiberBody

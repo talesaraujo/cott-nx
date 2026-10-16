@@ -1,0 +1,15 @@
+# Crash of the Titans (Xbox 360, USA) - ReXGlue code generator manifest.
+#
+# default.xex SHA-256 e76824b242c6c628738c373bdf052d456945d8e343eb934100617fd423e86373
+# (5,382,144 bytes, PE name Crash007f.exe, XDK 2.0.5426). Every address in this project refers to it.
+#
+#   overrides.toml  written by hand: specific findings, each with its explanation
+[project]
+name = "cott"
+sdk_version = "0.10.0"
+game_root = "../assets/game_root"
+
+[entrypoint]
+file_path = "../assets/game_root/default.xex"
+out_directory_path = "generated/default"
+includes = ["overrides.toml"]
