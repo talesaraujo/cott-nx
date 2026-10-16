@@ -9,8 +9,15 @@
 #include <memory>
 #include <unordered_map>
 
+#include <array>
+
 #include <rex/graphics/command_processor.h>
 #include <rex/graphics/pipeline/shader/shader.h>
+#include <rex/ui/vulkan/api.h>
+
+namespace rex::ui::vulkan {
+class VulkanDevice;
+}
 
 namespace rex::graphics::native {
 
@@ -34,6 +41,26 @@ class NativeCommandProcessor : public CommandProcessor {
   bool IssueCopy() override;
 
  private:
+  ui::vulkan::VulkanDevice* vulkan_device() const;
+
+  // Frames in flight. Each slot has its own command pool, command buffer and fence, so the next frame is
+  // recorded while the GPU works on the previous ones (the nfsmw-nx scheme, docs/native-renderer.md).
+  struct FrameSlot {
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    bool submitted = false;
+  };
+  static constexpr size_t kFrameSlots = 3;
+  std::array<FrameSlot, kFrameSlots> slots_{};
+  size_t slot_index_ = 0;
+
+  bool CreateFrameSlots();
+  void DestroyFrameSlots();
+  // Waits until the slot is free and opens its command buffer.
+  VkCommandBuffer BeginSlot();
+  bool SubmitSlot();
+
   // Every distinct microcode the game loads, by the XXH3 of its guest bytes: the same key as the shader
   // storage (.xsh) and the SPIR-V library.
   std::unordered_map<uint64_t, std::unique_ptr<Shader>> shaders_;
