@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <fstream>
 
 #include <rex/cvar.h>
 #include <rex/graphics/pipeline/texture/util.h>
@@ -255,6 +257,17 @@ NativeImage* NativeTargets::GetDepthTarget(const RegisterFile& regs) {
                           uint32_t(surface.msaa_samples), 1});
 }
 
+std::vector<NativeImage*> NativeTargets::Aliases(NativeImage* image, uint32_t base_tiles,
+                                                bool is_depth) {
+  std::vector<NativeImage*> result{image};
+  for (auto& [key, other] : targets_) {
+    if (other.get() != image && key.base_tiles == base_tiles && bool(key.is_depth) == is_depth) {
+      result.push_back(other.get());
+    }
+  }
+  return result;
+}
+
 NativeImage* NativeTargets::FindTexture(uint32_t base) {
   auto it = destinations_.find(base);
   return it != destinations_.end() ? it->second.get() : nullptr;
@@ -329,13 +342,17 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
           image->guest_pitch = dest_pitch.copy_dest_pitch;
           image->guest_height = dest_pitch.copy_dest_height;
           image->guest_format = uint32_t(dest_format);
+          image->swap_red_blue = !copy_depth && info.copy_dest_info.copy_dest_swap;
           if (copy_depth && xenos::DepthRenderTargetFormat(src_edram.format) ==
                                 xenos::DepthRenderTargetFormat::kD24FS8) {
             image->sample_scale = 2.0f;
           }
-          REXGPU_INFO("[native] resolve destination {}: {:08X} {}x{} format {}",
+          REXGPU_INFO("[native] resolve destination {}: {:08X} {}x{} format {}, from EDRAM base {} "
+                      "({}, msaa {}, red/blue swap {})",
                       destinations_.size() + 1, dest_base, image->width, image->height,
-                      uint32_t(dest_format));
+                      uint32_t(dest_format), src_original, copy_depth ? "depth" : "color",
+                      uint32_t(src_edram.msaa_samples),
+                      uint32_t(info.copy_dest_info.copy_dest_swap));
           dest = image.get();
           destinations_.emplace(dest_base, std::move(image));
         }
@@ -411,9 +428,14 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
           color.float32[i] = float((info.rb_color_clear >> (i * 8)) & 0xFF) * (1.0f / 255.0f);
         }
       }
-      Transition(cb, *rt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+      // Every image of the same EDRAM area, whatever its MSAA mode: the game clears in 4X and draws
+      // in 2X (the same samples on the console; separate images here).
       const VkImageSubresourceRange range = ui::vulkan::util::InitializeSubresourceRange();
-      dfn.vkCmdClearColorImage(cb, rt->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &color, 1, &range);
+      for (NativeImage* alias : Aliases(rt, info.color_original_base, false)) {
+        Transition(cb, *alias, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        dfn.vkCmdClearColorImage(cb, alias->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &color, 1,
+                                 &range);
+      }
     }
   }
   if (info.IsClearingDepth()) {
@@ -426,13 +448,80 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
                         ? xenos::Float20e4To32(depth24) * 0.5f
                         : xenos::UNorm24To32(depth24);
       value.stencil = info.rb_depth_clear & 0xFF;
-      Transition(cb, *rt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
       const VkImageSubresourceRange range = ui::vulkan::util::InitializeSubresourceRange(
           VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
-      dfn.vkCmdClearDepthStencilImage(cb, rt->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &value, 1,
-                                      &range);
+      for (NativeImage* alias : Aliases(rt, info.depth_original_base, true)) {
+        Transition(cb, *alias, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        dfn.vkCmdClearDepthStencilImage(cb, alias->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &value,
+                                        1, &range);
+      }
     }
   }
+}
+
+void NativeTargets::DumpImages(const std::string& dir, const std::function<VkCommandBuffer()>& begin,
+                               const std::function<void()>& submit_and_wait) {
+  const ui::vulkan::VulkanDevice::Functions& dfn = device_->functions();
+  const VkDevice device = device_->device();
+  auto dump = [&](NativeImage& image, const std::string& name) {
+    const bool depth = image.aspect & VK_IMAGE_ASPECT_DEPTH_BIT;
+    const uint32_t width = image.width, height = std::min(image.height, 720u);
+    const VkDeviceSize size = VkDeviceSize(width) * height * 4;
+    VkBuffer buffer;
+    VkDeviceMemory memory;
+    if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
+            device_, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            ui::vulkan::util::MemoryPurpose::kReadback, buffer, memory)) {
+      return;
+    }
+    VkCommandBuffer cb = begin();
+    Transition(cb, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkBufferImageCopy copy = {};
+    copy.imageSubresource = {VkImageAspectFlags(depth ? VK_IMAGE_ASPECT_DEPTH_BIT
+                                                      : VK_IMAGE_ASPECT_COLOR_BIT),
+                             0, 0, 1};
+    copy.imageExtent = {width, height, 1};
+    dfn.vkCmdCopyImageToBuffer(cb, image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1,
+                               &copy);
+    submit_and_wait();
+    void* data = nullptr;
+    if (dfn.vkMapMemory(device, memory, 0, VK_WHOLE_SIZE, 0, &data) == VK_SUCCESS) {
+      VkMappedMemoryRange range = {};
+      range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+      range.memory = memory;
+      range.size = VK_WHOLE_SIZE;
+      dfn.vkInvalidateMappedMemoryRanges(device, 1, &range);
+      std::ofstream file(dir + "/" + name + ".ppm", std::ios::binary);
+      file << "P6\n" << width << " " << height << "\n255\n";
+      const auto* bytes = static_cast<const uint8_t*>(data);
+      const bool float_texels = depth || image.format == VK_FORMAT_R32_SFLOAT;
+      for (uint32_t i = 0; i < width * height; ++i) {
+        uint8_t rgb[3];
+        if (float_texels) {
+          float value;
+          std::memcpy(&value, bytes + i * 4, 4);
+          const uint8_t v = uint8_t(std::clamp(value * image.sample_scale * (depth ? 2.0f : 1.0f),
+                                               0.0f, 1.0f) * 255.0f);
+          rgb[0] = rgb[1] = rgb[2] = v;
+        } else {
+          std::memcpy(rgb, bytes + i * 4, 3);
+        }
+        file.write(reinterpret_cast<const char*>(rgb), 3);
+      }
+      dfn.vkUnmapMemory(device, memory);
+    }
+    dfn.vkDestroyBuffer(device, buffer, nullptr);
+    dfn.vkFreeMemory(device, memory, nullptr);
+  };
+  for (auto& [key, image] : targets_) {
+    dump(*image, fmt::format("rt_base{}_pitch{}_fmt{}_msaa{}{}", key.base_tiles, key.pitch_tiles,
+                             key.format, key.msaa, key.is_depth ? "_depth" : ""));
+  }
+  for (auto& [base, image] : destinations_) {
+    dump(*image, fmt::format("dest_{:08X}_fmt{}", base, image->guest_format));
+  }
+  REXGPU_INFO("[native] dumped {} render targets and {} destinations to {}", targets_.size(),
+              destinations_.size(), dir);
 }
 
 }  // namespace rex::graphics::native

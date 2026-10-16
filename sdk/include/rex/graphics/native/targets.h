@@ -24,6 +24,8 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include <string>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -61,6 +63,10 @@ struct NativeImage {
   uint32_t guest_format = 0;
   // Multiplier for sampling it as a texture: 2 for depth resolved from D24FS8 (host depth is halved).
   float sample_scale = 1.0f;
+  // Color destinations resolved with RB_COPY_DEST_INFO::copy_dest_swap: in guest memory red and blue
+  // trade places. The image keeps the render target's order; sampling swaps them (the game's fetch
+  // swizzle swaps them back).
+  bool swap_red_blue = false;
 };
 
 class NativeTargets {
@@ -87,6 +93,11 @@ class NativeTargets {
   // Moves the image to `layout` with a conservative full barrier (M3b keeps synchronization simple).
   void Transition(VkCommandBuffer cb, NativeImage& image, VkImageLayout layout);
 
+  // Debugging: writes every render target and resolve destination to `dir` as PPM images. `begin`
+  // opens a command buffer, `submit_and_wait` runs it to completion (the GPU must be idle before).
+  void DumpImages(const std::string& dir, const std::function<VkCommandBuffer()>& begin,
+                  const std::function<void()>& submit_and_wait);
+
   uint64_t resolves() const { return resolves_; }
   uint64_t skipped() const { return skipped_; }
 
@@ -107,6 +118,8 @@ class NativeTargets {
   };
 
   NativeImage* GetRenderTarget(const RenderTargetKey& key);
+  // `image` and every other render target at the same EDRAM base (color or depth), in any MSAA mode.
+  std::vector<NativeImage*> Aliases(NativeImage* image, uint32_t base_tiles, bool is_depth);
   // The destination texture a resolve writes to, and the x position (pixels) of the resolved strip
   // inside it.
   NativeImage* FindDestination(uint32_t base, uint32_t pitch, uint32_t height, uint32_t format,

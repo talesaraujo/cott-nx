@@ -21,9 +21,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 
 #include <rex/cvar.h>
 
+REXCVAR_DEFINE_STRING(native_dump_trigger, "", "GPU/Native",
+                      "Debugging: when this file appears, the images of the next frame are written "
+                      "next to it (as PPM) and the file is deleted");
 REXCVAR_DEFINE_BOOL(native_present_last_resolve, false, "GPU/Native",
                     "Show the destination of the latest color resolve instead of the front buffer "
                     "(debugging the render targets before draws work)");
@@ -298,6 +302,29 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   }
   // Not painted (no presenter, minimized window): the frame's work still has to go.
   SubmitFrame();
+
+  // Debugging: dump this frame's images once the trigger file appears.
+  const std::string& trigger = REXCVAR_GET(native_dump_trigger);
+  std::error_code error;
+  if (!trigger.empty() && std::filesystem::exists(trigger, error)) {
+    std::filesystem::remove(trigger, error);
+    const ui::vulkan::VulkanDevice* const device = vulkan_device();
+    for (FrameSlot& slot : slots_) {
+      if (slot.submitted) {
+        device->functions().vkWaitForFences(device->device(), 1, &slot.fence, VK_TRUE, UINT64_MAX);
+      }
+    }
+    const std::string dir = std::filesystem::path(trigger).parent_path().string();
+    targets_.DumpImages(
+        dir.empty() ? "." : dir,
+        [this]() { return EnsureFrame(); },
+        [this, device]() {
+          const size_t slot = slot_index_;
+          SubmitFrame();
+          device->functions().vkWaitForFences(device->device(), 1, &slots_[slot].fence, VK_TRUE,
+                                              UINT64_MAX);
+        });
+  }
 
   const auto now = std::chrono::steady_clock::now();
   if (now - report_start_ >= kReportInterval) {

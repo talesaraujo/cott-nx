@@ -444,7 +444,18 @@ void NativeTextures::Prepare(VkCommandBuffer cb, const xenos::xe_gpu_texture_fet
       before_commands();
       targets.Transition(cb, *resolved, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
-    out.view = GetView(resolved->image, resolved->format, 1, fetch.swizzle,
+    uint32_t swizzle = fetch.swizzle;
+    if (resolved->swap_red_blue) {
+      // Components 0 and 2 of the guest texture are the render target's blue and red.
+      uint32_t swapped = 0;
+      for (uint32_t i = 0; i < 4; ++i) {
+        uint32_t c = (swizzle >> (i * 3)) & 7;
+        c = c == 0 ? 2 : c == 2 ? 0 : c;
+        swapped |= c << (i * 3);
+      }
+      swizzle = swapped;
+    }
+    out.view = GetView(resolved->image, resolved->format, 1, swizzle,
                        resolved_views_[resolved->image]);
     out.sampler = GetSampler(fetch, 1);
     out.sample_scale = resolved->sample_scale;

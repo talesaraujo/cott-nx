@@ -851,8 +851,17 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
     if (!shader) continue;
     for (uint32_t slot : shader->texture_slots) {
       if (slot >= kTextureSlots) continue;
-      textures_.Prepare(cb, regs.GetTextureFetch(slot), targets_, [this]() { EndRendering(); },
-                        bindings[slot]);
+      const xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(slot);
+      textures_.Prepare(cb, fetch, targets_, [this]() { EndRendering(); }, bindings[slot]);
+      if (shader == ps && traced_shaders_.insert(ps->hash ^ slot).second) {
+        NativeImage* resolved = targets_.FindTexture(fetch.base_address << 12);
+        REXGPU_INFO("[native] PS {:016X} slot {}: {:08X} format {} {}x{} swizzle {:03X} tiled {} "
+                    "endian {} -> {}",
+                    ps->hash, slot, fetch.base_address << 12, uint32_t(fetch.format),
+                    fetch.size_2d.width + 1, fetch.size_2d.height + 1, uint32_t(fetch.swizzle),
+                    uint32_t(fetch.tiled), uint32_t(fetch.endianness),
+                    resolved ? "resolve destination" : "memory texture");
+      }
       sample_scales[slot] = bindings[slot].sample_scale;
       any_texture = true;
     }
