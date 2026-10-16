@@ -12,9 +12,16 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <filesystem>
 #include <string>
 #include <vector>
+
+#if REX_PLATFORM_SWITCH
+#include <spdlog/sinks/stdout_sinks.h>
+#include <netinet/in.h>  // struct in_addr, for __nxlink_host
+#include <switch.h>
+#endif
 
 class CottApp : public rex::ReXApp {
  public:
@@ -34,6 +41,7 @@ class CottApp : public rex::ReXApp {
   // Also points content_backup_root at <executable folder>/saves, so every save leaves a copy the
   // player can see (saves/<profile>/actual and anterior).
   void OnConfigurePaths(rex::PathConfig& paths) override {
+    StartNxlinkStdout();
     ChooseSaveBackupFolder();
     if (!paths.game_data_root.empty()) {
       return;  // given on the command line; it takes precedence.
@@ -77,10 +85,39 @@ class CottApp : public rex::ReXApp {
 #if !REX_PLATFORM_SWITCH
     // Keyboard and mouse as a controller on PC. Not on the Switch: it would shadow the libnx pads.
     SetIfNotRequested("mnk_mode", "true");
+#else
+    // Started by nxlink: the log also goes to the PC's terminal, live (see StartNxlinkStdout).
+    if (nxlink_stdout_) {
+      rex::AddSink(std::make_shared<spdlog::sinks::stdout_sink_mt>());
+    }
 #endif
   }
 
  private:
+  // When hbmenu's netloader started us (tools/switch/send.sh), libnx fills in __nxlink_host from the
+  // arguments. stdout then goes to `nxlink -s` on the PC, so the log can be read while the game runs
+  // and is not lost when it hangs. Only stdout: stderr stays in logs/rex/rex_stderr.log, where
+  // switch_crash_hooks.c sends it. Runs in the first hook after main (before logging starts).
+  void StartNxlinkStdout() {
+#if REX_PLATFORM_SWITCH
+    if (nxlink_stdout_ || __nxlink_host.s_addr == 0) {
+      return;
+    }
+    if (R_FAILED(socketInitializeDefault())) {
+      return;
+    }
+    nxlink_stdout_ = nxlinkConnectToHost(true, false) >= 0;
+    if (nxlink_stdout_) {
+      setvbuf(stdout, nullptr, _IOLBF, 0);
+      std::printf("cott: nxlink stdout connected\n");
+    } else {
+      socketExit();
+    }
+#endif
+  }
+
+  bool nxlink_stdout_ = false;
+
   static std::string Lower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
                    [](unsigned char c) { return char(std::tolower(c)); });
