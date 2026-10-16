@@ -18,6 +18,7 @@
 #include <rex/graphics/d3d12/graphics_system.h>
 #endif
 #if REX_HAS_VULKAN
+#include <rex/graphics/native/graphics_system.h>
 #include <rex/graphics/vulkan/graphics_system.h>
 #endif
 
@@ -44,6 +45,10 @@ extern "C" REX_GPU_PLUGIN_EXPORT rex::system::IGraphicsSystem* rex_gpu_create(
   }
 #endif
 #if REX_HAS_VULKAN
+  // COTT: the native renderer (Phase 3). Only on request: "any" keeps the emulation.
+  if (backend == "native") {
+    return new rex::graphics::native::NativeGraphicsSystem();
+  }
   if (backend == "any" || backend == "vulkan") {
     return new rex::graphics::vulkan::VulkanGraphicsSystem();
   }

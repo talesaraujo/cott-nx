@@ -52,6 +52,9 @@ set(REXGPU_XENOS_VULKAN_SOURCES
     vulkan/shader.cpp
     vulkan/shared_memory.cpp
     vulkan/texture_cache.cpp
+    # COTT: the native renderer (Phase 3), selected with gpu_backend=native.
+    native/graphics_system.cpp
+    native/command_processor.cpp
 )
 
 # D3D12 backend
