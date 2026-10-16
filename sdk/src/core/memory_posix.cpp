@@ -483,6 +483,14 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
     shm_unlink(full_path.c_str());
     return kFileMappingHandleInvalid;
   }
+  // Remove the name right away: the object stays alive through this fd and
+  // the views mapped from it, and the kernel frees it when the process ends,
+  // however it ends. Nothing reopens it by name (MapFileView takes the fd).
+  // Before, the name was only removed in CloseFileMappingHandle, so every
+  // run that crashed, was killed, or exited without destroying Memory left a
+  // /dev/shm/xenia_memory_* file behind, holding the guest RAM it had touched
+  // (RAM-backed tmpfs, hundreds of MB each) until reboot.
+  shm_unlink(full_path.c_str());
   return static_cast<FileMappingHandle>(ret);
 #endif
 }

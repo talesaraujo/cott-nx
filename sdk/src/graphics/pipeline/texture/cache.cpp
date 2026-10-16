@@ -10,7 +10,10 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <mutex>
+#include <set>
 #include <utility>
 
 #include <rex/assert.h>
@@ -910,17 +913,39 @@ void TextureCache::BindingInfoFromFetchConstant(const xenos::xe_gpu_texture_fetc
   switch (fetch.type) {
     case xenos::FetchConstantType::kTexture:
       break;
-    case xenos::FetchConstantType::kInvalidTexture:
+    case xenos::FetchConstantType::kInvalidTexture: {
       if (REXCVAR_GET(gpu_allow_invalid_fetch_constants)) {
         break;
+      }
+      // An EMPTY slot: "invalid" type and no address at all is what D3D
+      // leaves after unbinding a texture (SetTexture(n, NULL)), and games
+      // draw with such slots (e.g. while textures stream in). Nothing is
+      // bound either way (with the flag above, the address check below would
+      // return just the same), so it isn't worth a warning: it was logged
+      // for every draw, thousands of lines per level load.
+      if (fetch.base_address == 0 && fetch.mip_address == 0) {
+        return;
+      }
+      // One that points at memory may matter: warned once per distinct
+      // constant (not per draw), up to 64 of them.
+      static std::mutex warned_mutex;
+      static std::set<std::array<uint32_t, 6>> warned;
+      {
+        std::lock_guard<std::mutex> lock(warned_mutex);
+        const std::array<uint32_t, 6> words = {fetch.dword_0, fetch.dword_1, fetch.dword_2,
+                                               fetch.dword_3, fetch.dword_4, fetch.dword_5};
+        if (warned.size() >= 64 || !warned.insert(words).second) {
+          return;
+        }
       }
       REXGPU_WARN(
           "Texture fetch constant ({:08X} {:08X} {:08X} {:08X} {:08X} {:08X}) "
           "has \"invalid\" type! This is incorrect behavior, but you can try "
           "bypassing this by launching Xenia with "
-          "--gpu_allow_invalid_fetch_constants=true.",
+          "--gpu_allow_invalid_fetch_constants=true. (Logged once per constant.)",
           fetch.dword_0, fetch.dword_1, fetch.dword_2, fetch.dword_3, fetch.dword_4, fetch.dword_5);
       return;
+    }
     default:
       REXGPU_WARN(
           "Texture fetch constant ({:08X} {:08X} {:08X} {:08X} {:08X} {:08X}) "

@@ -882,10 +882,14 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
     y1 = y0 + int32_t(xenos::kMaxResolveSize);
   }
 
-  assert_true(x0 < x1 && y0 < y1);
   if (x0 >= x1 || y0 >= y1) {
-    REXGPU_ERROR("Resolve region is empty");
-    return false;
+    // Legitimately empty: with predicated tiling, games issue every tile's
+    // resolve in every tile pass, and the scissor clips the other tiles'
+    // rectangles to nothing. That's a successful no-op, not a failure:
+    // info_out already says width/height 0 (set at the top), which both
+    // backends' Resolve() treat as "nothing to copy/clear".
+    REXGPU_NOISY_TRACE("Resolve region is empty (clipped away by the scissor)");
+    return true;
   }
 
   info_out.coordinate_info.width_div_8 = uint32_t(x1 - x0) >> xenos::kResolveAlignmentPixelsLog2;

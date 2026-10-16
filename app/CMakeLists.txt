@@ -21,4 +21,16 @@ else()
     add_executable(cott ${COTT_SOURCES})
 endif()
 
-rexglue_setup_target(cott)
+rexglue_setup_target(cott GPU_PLUGINS xenos)
+
+# PC build with the SDK as a subdirectory: rex_app.cpp includes imgui.h and rexruntime links imgui
+# privately, so its include path does not reach the executable (same fix as nfsmw-nx). On Switch
+# rexglue_switch.cmake handles it. The same goes for renderdoc_app.h.
+if(NOT REXGLUE_PLATFORM_SWITCH AND TARGET imgui)
+    target_include_directories(cott PRIVATE
+        $<TARGET_PROPERTY:imgui,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
+if(NOT REXGLUE_PLATFORM_SWITCH AND TARGET renderdoc)
+    target_include_directories(cott PRIVATE
+        $<TARGET_PROPERTY:renderdoc,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()

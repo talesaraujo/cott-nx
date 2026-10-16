@@ -29,6 +29,39 @@
 "0x823E9C00" = { name = "XapiFiberStartTrampoline", size = 0x10 }
 "0x823E9C10" = { name = "XapiSwitchToFiberBody", size = 0x40C }
 
+
+# Functions reachable only through pointers (vtables, callbacks): invisible to static analysis,
+# so the analyzer glued them onto the function before. At run time they show up one at a time as
+#   [FATAL] Call to invalid or unregistered function at guest address 0x823F5880
+# (first PC boot, 2026-10-16). MojoRecomp's map has 32 function starts our codegen did not find; 7 are the XAPI fibers handled below
+# (tools/mojo_lookup.py --missing app/generated/default); the other 25 are declared here at once.
+# Empty {} = "a function starts here": the analyzer finds the extent.
+"0x820C2598" = { }   # Mojo size 0x20
+"0x820DEAA0" = { }   # Mojo size 0x10
+"0x8212E478" = { }   # Mojo size 0x8
+"0x821D7BE0" = { }   # Mojo size 0x8
+"0x821D98E0" = { }   # Mojo size 0x8
+"0x821D98E8" = { }   # Mojo size 0x8
+"0x821D98F0" = { }   # Mojo size 0x8
+"0x821D98F8" = { }   # Mojo size 0x8
+"0x8225D538" = { }   # Mojo size 0x8
+"0x8225D848" = { }   # Mojo size 0x8
+"0x8225D908" = { }   # Mojo size 0x10
+"0x8238EE28" = { }   # Mojo size 0x10
+"0x823F5880" = { }   # Mojo size 0x18
+"0x823FAEC8" = { }   # Mojo size 0x24
+"0x823FAF10" = { }   # Mojo size 0x1C
+"0x823FD440" = { }   # Mojo size 0x8
+"0x823FD448" = { }   # Mojo size 0x8
+"0x823FD460" = { }   # Mojo size 0x8
+"0x823FD470" = { }   # Mojo size 0x8
+"0x823FE398" = { }   # Mojo size 0x8
+"0x823FF588" = { }   # Mojo size 0x8
+"0x823FF5A0" = { }   # Mojo size 0x8
+"0x823FF5A8" = { }   # Mojo size 0x8
+"0x823FF5B8" = { }   # Mojo size 0x8
+"0x823FF5D8" = { }   # Mojo size 0x8
+
 # ----------------------------------------------------------------------------
 #  ReXCRT - guest CRT / XAPI functions replaced by the SDK's native versions.
 # ----------------------------------------------------------------------------
