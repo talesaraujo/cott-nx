@@ -56,6 +56,10 @@ set(REXGPU_XENOS_VULKAN_SOURCES
     native/graphics_system.cpp
     native/command_processor.cpp
     native/targets.cpp
+    native/draw.cpp
+    native/shader_library.cpp
+    native/textures.cpp
+    native/upload_arena.cpp
 )
 
 # D3D12 backend

@@ -236,6 +236,25 @@ NativeImage* NativeTargets::FindDestination(uint32_t base, uint32_t pitch, uint3
   return nullptr;
 }
 
+NativeImage* NativeTargets::GetColorTarget(const RegisterFile& regs, uint32_t index) {
+  const auto surface = regs.Get<reg::RB_SURFACE_INFO>();
+  const auto color = regs.Get<reg::RB_COLOR_INFO>(reg::RB_COLOR_INFO::rt_register_indices[index]);
+  const uint32_t is_64bpp = uint32_t(xenos::IsColorRenderTargetFormat64bpp(color.color_format));
+  const uint32_t pitch_tiles =
+      xenos::GetSurfacePitchTiles(surface.surface_pitch, surface.msaa_samples, false) << is_64bpp;
+  return GetRenderTarget({uint32_t(color.color_base), pitch_tiles, uint32_t(color.color_format),
+                          uint32_t(surface.msaa_samples), 0});
+}
+
+NativeImage* NativeTargets::GetDepthTarget(const RegisterFile& regs) {
+  const auto surface = regs.Get<reg::RB_SURFACE_INFO>();
+  const auto depth = regs.Get<reg::RB_DEPTH_INFO>();
+  const uint32_t pitch_tiles =
+      xenos::GetSurfacePitchTiles(surface.surface_pitch, surface.msaa_samples, false);
+  return GetRenderTarget({uint32_t(depth.depth_base), pitch_tiles, uint32_t(depth.depth_format),
+                          uint32_t(surface.msaa_samples), 1});
+}
+
 NativeImage* NativeTargets::FindTexture(uint32_t base) {
   auto it = destinations_.find(base);
   return it != destinations_.end() ? it->second.get() : nullptr;
@@ -310,6 +329,10 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
           image->guest_pitch = dest_pitch.copy_dest_pitch;
           image->guest_height = dest_pitch.copy_dest_height;
           image->guest_format = uint32_t(dest_format);
+          if (copy_depth && xenos::DepthRenderTargetFormat(src_edram.format) ==
+                                xenos::DepthRenderTargetFormat::kD24FS8) {
+            image->sample_scale = 2.0f;
+          }
           REXGPU_INFO("[native] resolve destination {}: {:08X} {}x{} format {}",
                       destinations_.size() + 1, dest_base, image->width, image->height,
                       uint32_t(dest_format));

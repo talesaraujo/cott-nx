@@ -87,6 +87,15 @@ class CottApp : public rex::ReXApp {
     // after 8 pipelines with a black screen, no sound and a sluggish HOME menu (GPU stuck). On the PC
     // FBO reaches the title but goes black after it. 2026-10-16, Switch runs 1-6.
     SetIfNotRequested("render_target_path_vulkan", "fsi");
+    // The native renderer (Phase 3) needs buffer device addresses and descriptor arrays for the
+    // translated shaders, and the folder they were generated into (tools/shaders; never committed).
+    if (rex::cvar::GetFlagInfo("gpu_backend") != nullptr &&
+        Lower(rex::cvar::GetFlagByName("gpu_backend")) == "native") {
+      SetIfNotRequested("vulkan_native_shader_features", "true");
+#if REX_PLATFORM_SWITCH
+      SetIfNotRequested("native_shader_path", "sdmc:/switch/cott-nx/shaders");
+#endif
+    }
 #if !REX_PLATFORM_SWITCH
     // Keyboard and mouse as a controller on PC. Not on the Switch: it would shadow the libnx pads.
     SetIfNotRequested("mnk_mode", "true");

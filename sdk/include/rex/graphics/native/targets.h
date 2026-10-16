@@ -17,9 +17,9 @@
  * The tiled layout makes that move non-linear, so the strip's x position is recovered by searching which
  * offset of an existing destination gives that address (see FindDestination).
  *
- * What M3b covers: color render targets k_8_8_8_8(_GAMMA) and depth k_24_8 / k_24_8_FLOAT; copies to
+ * What is covered: color render targets k_8_8_8_8(_GAMMA) and depth k_24_8 / k_24_8_FLOAT; copies to
  * k_8_8_8_8 (color) and k_24_8(_FLOAT) (depth, as R32_SFLOAT); clears of the whole image; and the Swap
- * showing the destination texture at the front buffer address. Draws come in M3c.
+ * showing the destination texture at the front buffer address (M3b); draws into them (M3c).
  */
 #pragma once
 
@@ -59,6 +59,8 @@ struct NativeImage {
   uint32_t guest_pitch = 0;
   uint32_t guest_height = 0;
   uint32_t guest_format = 0;
+  // Multiplier for sampling it as a texture: 2 for depth resolved from D24FS8 (host depth is halved).
+  float sample_scale = 1.0f;
 };
 
 class NativeTargets {
@@ -71,6 +73,11 @@ class NativeTargets {
 
   // Performs the resolve described by the current registers: copy, then clears, as Xenos does.
   void Resolve(VkCommandBuffer cb, const RegisterFile& regs, const memory::Memory& memory);
+
+  // The render targets a draw writes, as bound by RB_SURFACE_INFO, RB_COLOR_INFO / RB_COLOR1_INFO and
+  // RB_DEPTH_INFO (same images the resolves read). Null when the format is not supported yet.
+  NativeImage* GetColorTarget(const RegisterFile& regs, uint32_t index);
+  NativeImage* GetDepthTarget(const RegisterFile& regs);
 
   // The destination texture whose guest base is exactly `base`, or null.
   NativeImage* FindTexture(uint32_t base);

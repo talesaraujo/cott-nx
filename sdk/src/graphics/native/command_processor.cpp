@@ -50,12 +50,11 @@ bool NativeCommandProcessor::SetupContext() {
     REXGPU_ERROR("[native] base command processor context failed");
     return false;
   }
-  if (!CreateFrameSlots() || !targets_.Initialize(vulkan_device())) {
+  if (!CreateFrameSlots() || !targets_.Initialize(vulkan_device()) || !CreateDrawObjects()) {
     return false;
   }
   report_start_ = std::chrono::steady_clock::now();
-  REXGPU_INFO("[native] native renderer, milestone M3b: render targets and resolves, draws "
-              "dropped");
+  REXGPU_INFO("[native] native renderer, milestone M3c: draws with the translated shaders");
   return true;
 }
 
@@ -156,12 +155,14 @@ bool NativeCommandProcessor::SubmitSlot() {
 VkCommandBuffer NativeCommandProcessor::EnsureFrame() {
   if (!frame_command_buffer_) {
     frame_command_buffer_ = BeginSlot();
+    BeginSlotDrawState();
   }
   return frame_command_buffer_;
 }
 
 void NativeCommandProcessor::SubmitFrame() {
   if (frame_command_buffer_) {
+    EndRendering();
     SubmitSlot();
     frame_command_buffer_ = VK_NULL_HANDLE;
   }
@@ -170,6 +171,7 @@ void NativeCommandProcessor::SubmitFrame() {
 void NativeCommandProcessor::ShutdownContext() {
   SubmitFrame();
   DestroyFrameSlots();
+  DestroyDrawObjects();
   targets_.Shutdown();
   REXGPU_INFO("[native] {} draws, {} copies and {} swaps in total; {} distinct shaders", draws_,
               copies_, swaps_, shaders_.size());
@@ -193,8 +195,8 @@ Shader* NativeCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32
   return result;
 }
 
-bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType /*prim_type*/, uint32_t /*index_count*/,
-                                       IndexBufferInfo* /*index_buffer_info*/,
+bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
+                                       IndexBufferInfo* index_buffer_info,
                                        bool /*major_mode_explicit*/) {
   // A resolve (EDRAM to memory copy) arrives as a draw with RB_MODECONTROL in copy mode, as in the
   // emulation (VulkanCommandProcessor::IssueDraw).
@@ -202,12 +204,14 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType /*prim_type*/, uint3
     return IssueCopy();
   }
   ++draws_;
-  return true;
+  return Draw(prim_type, index_count, index_buffer_info);
 }
 
 bool NativeCommandProcessor::IssueCopy() {
   ++copies_;
-  targets_.Resolve(EnsureFrame(), *register_file_, *memory_);
+  VkCommandBuffer cb = EnsureFrame();
+  EndRendering();
+  targets_.Resolve(cb, *register_file_, *memory_);
   return true;
 }
 
@@ -235,6 +239,7 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
               static_cast<ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext&>(context);
           const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device()->functions();
           VkCommandBuffer cb = EnsureFrame();
+          EndRendering();
           const VkImageSubresourceRange range = ui::vulkan::util::InitializeSubresourceRange();
 
           VkImageMemoryBarrier barrier = {};
@@ -298,11 +303,17 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   if (now - report_start_ >= kReportInterval) {
     const double seconds = std::chrono::duration<double>(now - report_start_).count();
     const uint64_t swaps = swaps_ - report_swaps_;
-    REXGPU_INFO("[native] {:.1f} swaps/s, {:.0f} draws and {:.1f} copies per frame, {} shaders, "
-                "{} resolves done and {} skipped in total (front buffer {:08X} {}x{})",
+    REXGPU_INFO("[native] {:.1f} swaps/s, {:.0f} draws ({:.0f} drawn) and {:.1f} copies per frame; "
+                "{} guest shaders, {} translated, {} pipelines; {} texture uploads ({} MB); "
+                "{} draws and {} resolves skipped in total; upload {} of {} MB (front buffer "
+                "{:08X})",
                 swaps / seconds, swaps ? double(draws_ - report_draws_) / swaps : 0.0,
+                swaps ? double(draws_done_ - report_draws_done_) / swaps : 0.0,
                 swaps ? double(copies_ - report_copies_) / swaps : 0.0, shaders_.size(),
-                targets_.resolves(), targets_.skipped(), frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+                shader_library_.loaded(), pipelines_.size(), textures_.uploads(),
+                textures_.upload_bytes() >> 20, draws_skipped_, targets_.skipped(),
+                upload_.used() >> 20, upload_.capacity() >> 20, frontbuffer_ptr);
+    report_draws_done_ = draws_done_;
     report_start_ = now;
     report_draws_ = draws_;
     report_copies_ = copies_;
