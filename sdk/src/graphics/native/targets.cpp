@@ -166,7 +166,15 @@ void NativeTargets::Skip(uint32_t reason, const char* text) {
   }
 }
 
-NativeImage* NativeTargets::GetRenderTarget(const RenderTargetKey& key) {
+NativeImage* NativeTargets::GetRenderTarget(const RenderTargetKey& requested) {
+  // 4X and 2X share one image: their pixels have the same height (two sample rows) and a 4X pixel is
+  // two 2X pixels wide, so 4X draws are scaled horizontally by 2 (see draw.cpp). The game clears the
+  // start of each strip in 4X and the rest in 2X before drawing the scene in 2X: separate images left
+  // most of the scene uncleared (bands at the strip ends).
+  RenderTargetKey key = requested;
+  if (key.msaa == uint32_t(xenos::MsaaSamples::k4X)) {
+    key.msaa = uint32_t(xenos::MsaaSamples::k2X);
+  }
   auto it = targets_.find(key);
   if (it != targets_.end()) {
     return it->second.get();
@@ -312,6 +320,10 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
   if (info.rb_copy_control.copy_command != xenos::CopyCommand::kNull &&
       info.copy_dest_extent_length) {
     NativeImage* src = GetRenderTarget(target_key(src_edram, src_original));
+    if (xenos::MsaaSamples(src_edram.msaa_samples) == xenos::MsaaSamples::k4X) {
+      src = nullptr;  // Would need a 2:1 horizontal downscale; not seen in the game so far.
+      Skip(6, "resolve from a 4X surface");
+    }
     const auto dest_format = info.copy_dest_info.copy_dest_format;
     const uint32_t dest_base = regs[XE_GPU_REG_RB_COPY_DEST_BASE];
     const auto dest_pitch = regs.Get<reg::RB_COPY_DEST_PITCH>();
@@ -324,7 +336,9 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
       dest_vk_format = VK_FORMAT_R32_SFLOAT;
     }
     if (!src) {
-      Skip(2, "source render target format not supported yet");
+      if (xenos::MsaaSamples(src_edram.msaa_samples) != xenos::MsaaSamples::k4X) {
+        Skip(2, "source render target format not supported yet");
+      }
     } else if (dest_vk_format == VK_FORMAT_UNDEFINED) {
       Skip(3, "destination format not supported yet");
     } else if (!dest_pitch.copy_dest_pitch || !dest_pitch.copy_dest_height) {

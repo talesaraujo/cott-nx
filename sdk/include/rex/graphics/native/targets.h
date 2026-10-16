@@ -117,7 +117,7 @@ class NativeTargets {
     }
   };
 
-  NativeImage* GetRenderTarget(const RenderTargetKey& key);
+  NativeImage* GetRenderTarget(const RenderTargetKey& requested);
   // `image` and every other render target at the same EDRAM base (color or depth), in any MSAA mode.
   std::vector<NativeImage*> Aliases(NativeImage* image, uint32_t base_tiles, bool is_depth);
   // The destination texture a resolve writes to, and the x position (pixels) of the resolved strip

@@ -225,6 +225,9 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   RexSwitchPerfCount(0);
 #endif
   ++swaps_;
+  trace_frame_ = trace_next_frame_;
+  trace_next_frame_ = false;
+  trace_draw_index_ = 0;
 
   // The image the game shows is the resolve destination at the front buffer address. The presenter
   // hands over its guest output image; the frame's commands and the blit into it are submitted before
@@ -308,6 +311,7 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   std::error_code error;
   if (!trigger.empty() && std::filesystem::exists(trigger, error)) {
     std::filesystem::remove(trigger, error);
+    trace_next_frame_ = true;
     const ui::vulkan::VulkanDevice* const device = vulkan_device();
     for (FrameSlot& slot : slots_) {
       if (slot.submitted) {

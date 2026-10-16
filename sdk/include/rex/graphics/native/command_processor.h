@@ -114,6 +114,9 @@ class NativeCommandProcessor : public CommandProcessor {
   std::vector<uint32_t> draw_indices_, draw_host_indices_;
 
   std::unordered_set<uint32_t> draw_skips_logged_;
+  // Debugging: log every draw of the frame after a dump (native_dump_trigger).
+  bool trace_frame_ = false, trace_next_frame_ = false;
+  uint32_t trace_draw_index_ = 0;
   // Pixel shader texture slots already described in the log (hash ^ slot).
   std::unordered_set<uint64_t> traced_shaders_;
   uint64_t draws_done_ = 0, draws_skipped_ = 0, report_draws_done_ = 0;
