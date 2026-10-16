@@ -94,6 +94,12 @@ echo "== install"
 rm -rf /install/opt
 meson install -C builddir-switch-vk --destdir /install
 test -f /install/opt/devkitpro/portlibs/switch/lib/libvulkan.a
+# The archives meson writes have no symbol index entries for the Rust std/core/alloc objects that the
+# Rust staticlibs bundle, so the final link found none of them (thousands of undefined
+# core::panicking::panic, __rdl_realloc...). ranlib rebuilds the index.
+for a in /install/opt/devkitpro/portlibs/switch/lib/*.a; do
+  /opt/devkitpro/devkitA64/bin/aarch64-none-elf-ranlib "$a"
+done
 '
 echo "NVK SDK: $OUT/opt/devkitpro/portlibs/switch"
 ls -la "$OUT/opt/devkitpro/portlibs/switch/lib" | head -20
