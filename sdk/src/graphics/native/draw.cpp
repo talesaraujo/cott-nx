@@ -22,6 +22,10 @@
 #include <cstdio>
 #include <cstring>
 
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #include <fmt/format.h>
 #include <xxhash.h>
 
@@ -202,6 +206,23 @@ uint32_t NormalizeDepthControl(xenos::EdramMode mode, uint32_t depth_control) {
 // Copies big-endian guest data, swapping each 32-bit word (or 16-bit halves) per the Xenos endian mode.
 void CopySwapped(uint8_t* dst, const uint8_t* src, size_t bytes, xenos::Endian endian) {
   size_t i = 0;
+#if defined(__aarch64__)
+  // 64 bytes per step with 16-byte stores: on the Switch the destination (upload memory) is not CPU
+  // cached, and 4-byte stores there made this copy a quarter of the ring thread's busy time.
+  if (endian == xenos::Endian::k8in16 || endian == xenos::Endian::k8in32 ||
+      endian == xenos::Endian::k16in32) {
+    for (; i + 64 <= bytes; i += 64) {
+      uint8x16x4_t v = vld1q_u8_x4(src + i);
+      for (int k = 0; k < 4; ++k) {
+        v.val[k] = endian == xenos::Endian::k8in16 ? vrev16q_u8(v.val[k])
+                   : endian == xenos::Endian::k8in32
+                       ? vrev32q_u8(v.val[k])
+                       : vreinterpretq_u8_u16(vrev32q_u16(vreinterpretq_u16_u8(v.val[k])));
+      }
+      vst1q_u8_x4(dst + i, v);
+    }
+  }
+#endif
   switch (endian) {
     case xenos::Endian::k8in16:
       for (; i + 4 <= bytes; i += 4) {
@@ -837,6 +858,9 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   std::vector<uint32_t>& indices = draw_indices_;
   indices.resize(index_count);
   const uint8_t* physical = memory_->TranslatePhysical(0);
+  // The fast index paths find the vertex range while they read.
+  uint32_t range_lo = UINT32_MAX, range_hi = 0;
+  bool range_known = false;
   if (index_buffer_info) {
     const bool index32 = index_buffer_info->format == xenos::IndexFormat::kInt32;
     const uint32_t restart_index =
@@ -849,6 +873,49 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
       default: break;
     }
     const uint32_t base = index_buffer_info->guest_base;
+    // The usual cases read whole indices (16-bit 8in16, 32-bit 8in32) and skip the clamp when the
+    // range is the whole one; the byte loop below handles everything else.
+    const bool no_remap = !index_offset && min_vertex == 0 && max_vertex == 0xFFFFFF;
+    const uint8_t* src = physical + (base & 0x1FFFFFFF);
+    if (no_remap && !index32 && index_buffer_info->endianness == xenos::Endian::k8in16 &&
+        !(base & 1)) {
+      uint32_t* out = indices.data();
+      uint32_t fast_lo = UINT32_MAX, fast_hi = 0;
+      for (uint32_t i = 0; i < index_count; ++i) {
+        uint16_t v;
+        std::memcpy(&v, src + size_t(i) * 2, 2);
+        const uint32_t raw = __builtin_bswap16(v);
+        if (restart && raw == restart_index) {
+          out[i] = kRestart;
+        } else {
+          out[i] = raw;
+          fast_lo = std::min(fast_lo, raw);
+          fast_hi = std::max(fast_hi, raw);
+        }
+      }
+      range_lo = fast_lo;
+      range_hi = fast_hi;
+      range_known = true;
+    } else if (no_remap && index32 && index_buffer_info->endianness == xenos::Endian::k8in32 &&
+               !(base & 3)) {
+      uint32_t* out = indices.data();
+      uint32_t fast_lo = UINT32_MAX, fast_hi = 0;
+      for (uint32_t i = 0; i < index_count; ++i) {
+        uint32_t v;
+        std::memcpy(&v, src + size_t(i) * 4, 4);
+        const uint32_t raw = __builtin_bswap32(v);
+        if (restart && raw == restart_index) {
+          out[i] = kRestart;
+        } else {
+          out[i] = raw & 0xFFFFFF;
+          fast_lo = std::min(fast_lo, out[i]);
+          fast_hi = std::max(fast_hi, out[i]);
+        }
+      }
+      range_lo = fast_lo;
+      range_hi = fast_hi;
+      range_known = true;
+    } else
     for (uint32_t i = 0; i < index_count; ++i) {
       uint32_t raw;
       if (index32) {
@@ -867,11 +934,13 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   } else {
     for (uint32_t i = 0; i < index_count; ++i) indices[i] = remap(i);
   }
-  uint32_t lo = UINT32_MAX, hi = 0;
-  for (uint32_t index : indices) {
-    if (index != kRestart) {
-      lo = std::min(lo, index);
-      hi = std::max(hi, index);
+  uint32_t lo = range_lo, hi = range_hi;
+  if (!range_known) {
+    for (uint32_t index : indices) {
+      if (index != kRestart) {
+        lo = std::min(lo, index);
+        hi = std::max(hi, index);
+      }
     }
   }
   if (lo > hi) {
