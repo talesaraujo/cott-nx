@@ -10,9 +10,12 @@
 #include <rex/logging.h>
 #include <rex/rex_app.h>
 
+REXCVAR_DECLARE(std::string, driver_env);
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -80,6 +83,7 @@ class CottApp : public rex::ReXApp {
   // Settings that must be on for a plain start with no arguments. Only those nobody set explicitly
   // (command line or cott.toml) are touched.
   void OnPostInitLogging() override {
+    ApplyDriverEnv();
     // Without a GPU plugin the game runs but every graphics call is discarded: black screen.
     SetIfNotRequested("gpu_plugin", "xenos");
     // Render targets through fragment shader interlock (RADV on the PC, NVK on the Tegra X1). With
@@ -108,6 +112,24 @@ class CottApp : public rex::ReXApp {
   }
 
  private:
+  // driver_env: NAME=value;NAME=value, exported before the Vulkan driver loads (it reads them with
+  // getenv). For driver diagnostics on the Switch, where there is no shell to set them.
+  static void ApplyDriverEnv() {
+    const std::string env = REXCVAR_GET(driver_env);
+    size_t start = 0;
+    while (start < env.size()) {
+      size_t end = env.find(';', start);
+      if (end == std::string::npos) end = env.size();
+      const std::string item = env.substr(start, end - start);
+      const size_t equals = item.find('=');
+      if (equals != std::string::npos && equals > 0) {
+        setenv(item.substr(0, equals).c_str(), item.substr(equals + 1).c_str(), 1);
+        REXLOG_INFO("[cott] driver environment: {}", item);
+      }
+      start = end + 1;
+    }
+  }
+
   // When hbmenu's netloader started us (tools/switch/send.sh), libnx fills in __nxlink_host from the
   // arguments. stdout then goes to `nxlink -s` on the PC, so the log can be read while the game runs
   // and is not lost when it hangs. Only stdout: stderr stays in logs/rex/rex_stderr.log, where

@@ -25,16 +25,39 @@ if [ ! -d "$X/.git" ]; then
   git -C "$X" apply "$REFS/MojoRecomp/patches/xenosrecomp-mojorecomp-runtime.patch"
 fi
 mkdir -p "$OUT/gen"
+# The sources are patched below for the variant asked for (COTT_UBO), so start from MojoRecomp's version.
+git -C "$X" checkout -q XenosRecomp/shader_common.h XenosRecomp/shader_recompiler.cpp
+git -C "$X" apply "$REFS/MojoRecomp/patches/xenosrecomp-mojorecomp-runtime.patch"
 # CotT: constants through uniform buffers. MojoRecomp's SPIR-V reads every constant, boolean and texture
 # index through a buffer device address, a memory load per use; on the Switch's GPU those loads made the
 # menu's 2D shader and the world shader 5-10x slower than their DXIL path, which reads cbuffers (Maxwell's
 # constant banks). COTT_UBO_CONSTANTS selects that cbuffer path for SPIR-V too: set 4, binding 0 the vertex
 # constants, 1 the pixel constants, 2 the shared constants (same layout as the BDA blocks). The renderer
 # binds both, so libraries built either way work.
+# COTT_UBO=1 builds that variant. It is off by default: on the Switch's NVK it made the menu's 2D shader
+# about 3x slower than the buffer-address path; the cause is still to be found.
+# Either way, texture and sampler indices are constants in the shader (the renderer's table is the
+# identity, slot N is index N): one memory load less before every texture fetch.
 python3 - "$X/XenosRecomp/shader_common.h" "$X/XenosRecomp/shader_recompiler.cpp" \
-    "$M/gpu/shader_translator.cpp" "$OUT/gen/shader_translator.cpp" <<'PY'
+    "$M/gpu/shader_translator.cpp" "$OUT/gen/shader_translator.cpp" "${COTT_UBO:-0}" <<'PY'
 import sys
-common, recompiler, translator_in, translator_out = sys.argv[1:5]
+common, recompiler, translator_in, translator_out, ubo = sys.argv[1:6]
+ubo = ubo == '1'
+s = open(recompiler).read()
+for old, new in (('println("#define {}_Texture{}DescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",\n'
+                  '                    constantName, TEXTURE_DIMENSIONS[j], j * 64 + constantInfo->registerIndex * 4);',
+                  'println("#define {}_Texture{}DescriptorIndex {}u",\n'
+                  '                    constantName, TEXTURE_DIMENSIONS[j], constantInfo->registerIndex.get());'),
+                 ('println("#define {}_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",\n'
+                  '                constantName, std::size(TEXTURE_DIMENSIONS) * 64 + constantInfo->registerIndex * 4);',
+                  'println("#define {}_SamplerDescriptorIndex {}u",\n'
+                  '                constantName, constantInfo->registerIndex.get());')):
+    assert old in s, 'shader_recompiler.cpp changed upstream'
+    s = s.replace(old, new, 1)
+open(recompiler, 'w').write(s)
+if not ubo:
+    open(translator_out, 'w').write(open(translator_in).read())
+    sys.exit(0)
 s = open(common).read()
 if 'COTT_UBO_CONSTANTS' not in s:
     s = s.replace('#ifdef __spirv__\n\nstruct PushConstants',
