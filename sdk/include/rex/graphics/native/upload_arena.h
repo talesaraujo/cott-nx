@@ -37,6 +37,7 @@ class UploadArena {
   uint8_t* Allocate(VkDeviceSize size, VkDeviceSize alignment, VkDeviceSize& offset_out);
 
   VkBuffer buffer() const { return slots_[slot_].buffer; }
+  VkBuffer buffer(size_t slot) const { return slots_[slot % kSlots].buffer; }
   VkDeviceAddress address() const { return slots_[slot_].address; }
   VkDeviceSize used() const { return used_; }
   VkDeviceSize capacity() const { return bytes_per_slot_; }

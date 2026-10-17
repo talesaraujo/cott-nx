@@ -52,6 +52,7 @@ namespace {
 
 constexpr uint32_t kTextureSlots = 16;
 constexpr uint32_t kDescriptorSetsPerSlot = 2048;
+constexpr VkDeviceSize kConstantsBytes = 4096;  // 256 float4 per stage
 constexpr VkDeviceSize kSharedBytes = 1024;
 
 // Offsets in the shared constants (MojoRecomp vk_presenter.cpp, kShared*).
@@ -298,12 +299,30 @@ bool NativeCommandProcessor::CreateDrawObjects() {
       return false;
     }
   }
+  {
+    // Set 4: the constants as dynamic uniform buffers, for shaders built with COTT_UBO_CONSTANTS
+    // (tools/shaders/build_translator.sh). Older ones read the same blocks through the push constants.
+    VkDescriptorSetLayoutBinding bindings[3] = {};
+    for (uint32_t i = 0; i < 3; ++i) {
+      bindings[i].binding = i;
+      bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+      bindings[i].descriptorCount = 1;
+      bindings[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo info = {};
+    info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    info.bindingCount = 3;
+    info.pBindings = bindings;
+    if (dfn.vkCreateDescriptorSetLayout(vk_device, &info, nullptr, &set_layouts_[4]) != VK_SUCCESS) {
+      return false;
+    }
+  }
   VkPushConstantRange push_range = {};
   push_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
   push_range.size = 3 * sizeof(uint64_t);
   VkPipelineLayoutCreateInfo layout_info = {};
   layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-  layout_info.setLayoutCount = 4;
+  layout_info.setLayoutCount = 5;
   layout_info.pSetLayouts = set_layouts_;
   layout_info.pushConstantRangeCount = 1;
   layout_info.pPushConstantRanges = &push_range;
@@ -311,23 +330,24 @@ bool NativeCommandProcessor::CreateDrawObjects() {
     return false;
   }
 
-  auto create_pool = [&](uint32_t sets, VkDescriptorPool& pool) {
+  auto create_pool = [&](uint32_t sets, uint32_t uniform_buffers, VkDescriptorPool& pool) {
     const VkDescriptorPoolSize sizes[] = {
         {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, sets * kTextureSlots},
         {VK_DESCRIPTOR_TYPE_SAMPLER, sets * kTextureSlots},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, std::max(1u, uniform_buffers)},
     };
     VkDescriptorPoolCreateInfo info = {};
     info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     info.maxSets = sets;
-    info.poolSizeCount = 2;
+    info.poolSizeCount = 3;
     info.pPoolSizes = sizes;
     return dfn.vkCreateDescriptorPool(vk_device, &info, nullptr, &pool) == VK_SUCCESS;
   };
-  if (!create_pool(2, static_pool_)) {
+  if (!create_pool(2 + uint32_t(kFrameSlots), 3 * uint32_t(kFrameSlots), static_pool_)) {
     return false;
   }
   for (VkDescriptorPool& pool : descriptor_pools_) {
-    if (!create_pool(kDescriptorSetsPerSlot, pool)) {
+    if (!create_pool(kDescriptorSetsPerSlot, 0, pool)) {
       return false;
     }
   }
@@ -353,6 +373,28 @@ bool NativeCommandProcessor::CreateDrawObjects() {
     writes[i].pImageInfo = images[i];
   }
   dfn.vkUpdateDescriptorSets(vk_device, 2, writes, 0, nullptr);
+
+  // The constant sets, one per upload slot; each draw passes its blocks as dynamic offsets.
+  for (size_t slot = 0; slot < kFrameSlots; ++slot) {
+    allocate_info.descriptorSetCount = 1;
+    allocate_info.pSetLayouts = &set_layouts_[4];
+    if (dfn.vkAllocateDescriptorSets(vk_device, &allocate_info, &constant_sets_[slot]) != VK_SUCCESS) {
+      return false;
+    }
+    VkDescriptorBufferInfo buffers[3] = {};
+    VkWriteDescriptorSet constant_writes[3] = {};
+    for (uint32_t i = 0; i < 3; ++i) {
+      buffers[i].buffer = upload_.buffer(slot);
+      buffers[i].range = i < 2 ? kConstantsBytes : kSharedBytes;
+      constant_writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      constant_writes[i].dstSet = constant_sets_[slot];
+      constant_writes[i].dstBinding = i;
+      constant_writes[i].descriptorCount = 1;
+      constant_writes[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+      constant_writes[i].pBufferInfo = &buffers[i];
+    }
+    dfn.vkUpdateDescriptorSets(vk_device, 3, constant_writes, 0, nullptr);
+  }
   return true;
 }
 
@@ -966,12 +1008,13 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   }
 
   // 6. Upload memory: constants and vertices.
-  // Only the float constants each shader can read (most read a few dozen of the 256).
+  // Only the float constants each shader can read are copied (most read a few dozen of the 256). The
+  // space is the full bank: the uniform buffer descriptors cover 4 KB from their dynamic offset.
   VkDeviceSize vs_constants_offset, ps_constants_offset, shared_offset;
   const VkDeviceSize vs_constants_bytes = std::max(1u, vs->constant_count) * 16;
   const VkDeviceSize ps_constants_bytes = std::max(1u, ps ? ps->constant_count : 1u) * 16;
-  uint8_t* vs_constants = upload_.Allocate(vs_constants_bytes, 256, vs_constants_offset);
-  uint8_t* ps_constants = upload_.Allocate(ps_constants_bytes, 256, ps_constants_offset);
+  uint8_t* vs_constants = upload_.Allocate(kConstantsBytes, 256, vs_constants_offset);
+  uint8_t* ps_constants = upload_.Allocate(kConstantsBytes, 256, ps_constants_offset);
   if (!vs_constants || !ps_constants) {
     SkipDraw(6, "upload memory full for this frame (raise native_upload_mb)");
     return true;
@@ -1270,6 +1313,10 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   dfn.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
   dfn.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_, 0, 4, sets, 0,
                               nullptr);
+  const uint32_t constant_offsets[3] = {uint32_t(vs_constants_offset), uint32_t(ps_constants_offset),
+                                        uint32_t(shared_offset)};
+  dfn.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_, 4, 1,
+                              &constant_sets_[slot_index_], 3, constant_offsets);
   dfn.vkCmdSetViewport(cb, 0, 1, &viewport);
   dfn.vkCmdSetScissor(cb, 0, 1, &scissor);
   float blend_constants[4];

@@ -108,7 +108,10 @@ class NativeCommandProcessor : public CommandProcessor {
   VkPipeline GetPipeline(const PipelineKey& key, const NativeShader& vs, const NativeShader* ps);
   std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> pipelines_;
 
-  VkDescriptorSetLayout set_layouts_[4] = {};
+  // Sets 0-3: 2D, 3D and cube textures and samplers. Set 4: the constants as dynamic uniform buffers
+  // (vertex, pixel, shared), one set per frame slot over its upload buffer.
+  VkDescriptorSetLayout set_layouts_[5] = {};
+  std::array<VkDescriptorSet, kFrameSlots> constant_sets_{};
   VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
   // Sets 1 and 2 (3D and cube textures: the game samples none) never change; sets 0 and 3 are written
   // per draw from the frame slot's pool.

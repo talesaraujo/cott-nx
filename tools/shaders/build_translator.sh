@@ -25,6 +25,94 @@ if [ ! -d "$X/.git" ]; then
   git -C "$X" apply "$REFS/MojoRecomp/patches/xenosrecomp-mojorecomp-runtime.patch"
 fi
 mkdir -p "$OUT/gen"
+# CotT: constants through uniform buffers. MojoRecomp's SPIR-V reads every constant, boolean and texture
+# index through a buffer device address, a memory load per use; on the Switch's GPU those loads made the
+# menu's 2D shader and the world shader 5-10x slower than their DXIL path, which reads cbuffers (Maxwell's
+# constant banks). COTT_UBO_CONSTANTS selects that cbuffer path for SPIR-V too: set 4, binding 0 the vertex
+# constants, 1 the pixel constants, 2 the shared constants (same layout as the BDA blocks). The renderer
+# binds both, so libraries built either way work.
+python3 - "$X/XenosRecomp/shader_common.h" "$X/XenosRecomp/shader_recompiler.cpp" \
+    "$M/gpu/shader_translator.cpp" "$OUT/gen/shader_translator.cpp" <<'PY'
+import sys
+common, recompiler, translator_in, translator_out = sys.argv[1:5]
+s = open(common).read()
+if 'COTT_UBO_CONSTANTS' not in s:
+    s = s.replace('#ifdef __spirv__\n\nstruct PushConstants',
+                  '#define COTT_UBO_CONSTANTS\n\n#if defined(__spirv__) && !defined(COTT_UBO_CONSTANTS)\n\nstruct PushConstants', 1)
+    s = s.replace('    uint4 g_LoopConstants[8] : packoffset(c24);',
+                  '    uint4 g_LoopConstants[8] : packoffset(c24); \\\n    uint4 g_BoolFile[2] : packoffset(c32);', 1)
+    s = s.replace('uint g_SpecConstants();',
+                  '#ifdef __spirv__\n[[vk::constant_id(0)]] const uint g_SpecConstants = 0;\n#define g_SpecConstants() g_SpecConstants\n'
+                  '#else\nuint g_SpecConstants();\n#endif', 1)
+    assert s.count('COTT_UBO_CONSTANTS') == 2 and 'g_BoolFile' in s, 'shader_common.h changed upstream'
+    open(common, 'w').write(s)
+s = open(recompiler).read()
+if 'COTT_UBO_CONSTANTS' not in s:
+    old = 'out += "#ifdef __spirv__\\n\\n";\n\n#ifdef UNLEASHED_RECOMP'
+    assert old in s, 'shader_recompiler.cpp changed upstream'
+    s = s.replace(old, 'out += "#if defined(__spirv__) && !defined(COTT_UBO_CONSTANTS)\\n\\n";\n\n#ifdef UNLEASHED_RECOMP', 1)
+    # The cbuffer arrays get a suffix: shaders with jumps keep their program counter in a local "pc",
+    # which hides the pixel constants array of the same name.
+    for old, new in (('print("\\tfloat4 {}", constantName);\n\n            if (constantInfo->registerCount > 1)\n'
+                      '                print("[{}]", constantInfo->registerCount.get());',
+                      'print("\\tfloat4 {}", constantName);\n\n            if (constantInfo->registerCount > 1)\n'
+                      '                print("_cb[{}]", constantInfo->registerCount.get());'),
+                     ('println("#define {0}(INDEX) select((INDEX) < {1}, {0}[min(INDEX, {2})], 0.0)"',
+                      'println("#define {0}(INDEX) select((INDEX) < {1}, {0}_cb[min(INDEX, {2})], 0.0)"')):
+        assert old in s, 'shader_recompiler.cpp changed upstream'
+        s = s.replace(old, new, 1)
+    # DXC wants the shared cbuffer's members in increasing offsets; they came grouped by sampler.
+    old = ('            for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)\n'
+           '            {\n'
+           '                println("\\tuint {}_Texture{}DescriptorIndex : packoffset(c{}.{});",\n'
+           '                    constantName, TEXTURE_DIMENSIONS[j], j * 4 + constantInfo->registerIndex / 4, SWIZZLES[constantInfo->registerIndex % 4]);\n'
+           '            }\n'
+           '\n'
+           '            println("\\tuint {}_SamplerDescriptorIndex : packoffset(c{}.{});",\n'
+           '                constantName, 4 * std::size(TEXTURE_DIMENSIONS) + constantInfo->registerIndex / 4, SWIZZLES[constantInfo->registerIndex % 4]);\n'
+           '        }\n'
+           '    }\n'
+           '\n'
+           '    out += "\\tDEFINE_SHARED_CONSTANTS();\\n";')
+    new = ('            for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)\n'
+           '            {\n'
+           '                cottMembers.emplace_back(uint32_t(j * 64 + constantInfo->registerIndex * 4), fmt::format("\\tuint {}_Texture{}DescriptorIndex : packoffset(c{}.{});\\n",\n'
+           '                    constantName, TEXTURE_DIMENSIONS[j], j * 4 + constantInfo->registerIndex / 4, SWIZZLES[constantInfo->registerIndex % 4]));\n'
+           '            }\n'
+           '\n'
+           '            cottMembers.emplace_back(uint32_t(std::size(TEXTURE_DIMENSIONS) * 64 + constantInfo->registerIndex * 4), fmt::format("\\tuint {}_SamplerDescriptorIndex : packoffset(c{}.{});\\n",\n'
+           '                constantName, 4 * std::size(TEXTURE_DIMENSIONS) + constantInfo->registerIndex / 4, SWIZZLES[constantInfo->registerIndex % 4]));\n'
+           '        }\n'
+           '    }\n'
+           '    std::sort(cottMembers.begin(), cottMembers.end());\n'
+           '    for (auto& member : cottMembers)\n'
+           '        out += member.second;\n'
+           '\n'
+           '    out += "\\tDEFINE_SHARED_CONSTANTS();\\n";')
+    assert old in s, 'shader_recompiler.cpp changed upstream'
+    s = s.replace(old, new, 1)
+    old = '    out += "cbuffer SharedConstants : register(b2, space4)\\n";\n'
+    assert old in s, 'shader_recompiler.cpp changed upstream'
+    s = s.replace(old, old + '    std::vector<std::pair<uint32_t, std::string>> cottMembers;\n', 1)
+    open(recompiler, 'w').write(s)
+s = open(translator_in).read()
+old = ('"\\n#define MOJORECOMP_BOOL_CONSTANT(INDEX) "\n'
+       '        "((vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 512 + "\n'
+       '        "((INDEX) >> 5) * 4) & (1u << ((INDEX) & 31))) != 0)\\n"\n'
+       '        "#ifdef __spirv__\\n"')
+assert old in s, 'shader_translator.cpp changed upstream'
+s = s.replace(old,
+    '"\\n#ifdef COTT_UBO_CONSTANTS\\n"\n'
+    '        "#define MOJORECOMP_BOOL_CONSTANT(INDEX) "\n'
+    '        "((g_BoolFile[(INDEX) >> 7][((INDEX) >> 5) & 3] & (1u << ((INDEX) & 31))) != 0)\\n"\n'
+    '        "#else\\n"\n'
+    '        "#define MOJORECOMP_BOOL_CONSTANT(INDEX) "\n'
+    '        "((vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 512 + "\n'
+    '        "((INDEX) >> 5) * 4) & (1u << ((INDEX) & 31))) != 0)\\n"\n'
+    '        "#endif\\n"\n'
+    '        "#if defined(__spirv__) && !defined(COTT_UBO_CONSTANTS)\\n"', 1)
+open(translator_out, 'w').write(s)
+PY
 python3 - "$X/XenosRecomp/shader_common.h" "$OUT/gen/mojorecomp_shader_common_embedded.h" <<'PY'
 import sys
 d = open(sys.argv[1], 'rb').read()
@@ -36,7 +124,7 @@ INC=(-I"$M" -I"$X/XenosRecomp" -I"$X/thirdparty/dxc-bin/inc" -I"$X/thirdparty/fm
 # -fms-extensions: DXC's WinAdapter.h declares its COM interfaces with __declspec(uuid).
 CXX=(clang++ -std=c++20 -O2 -w -fms-extensions -DMOJORECOMP_XENOS_BOOL_EXEC -DFMT_HEADER_ONLY)
 cd "$OUT"
-"${CXX[@]}" "${INC[@]}" -c "$M/gpu/shader_translator.cpp" -o st.o
+"${CXX[@]}" "${INC[@]}" -I"$M/gpu" -c "$OUT/gen/shader_translator.cpp" -o st.o
 "${CXX[@]}" "${INC[@]}" -c "$M/host/host_paths.cpp" -o hp.o
 "${CXX[@]}" "${INC[@]}" -include "$M/gpu/xenos_pch.h" -c "$X/XenosRecomp/shader_recompiler.cpp" -o sr.o
 "${CXX[@]}" "${INC[@]}" -c "$ROOT/tools/shaders/mojo_xlate_main.cpp" -o main.o
