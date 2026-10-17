@@ -167,16 +167,30 @@ void NativeTargets::Skip(uint32_t reason, const char* text) {
 }
 
 NativeImage* NativeTargets::GetRenderTarget(const RenderTargetKey& requested) {
-  // 4X and 2X share one image: their pixels have the same height (two sample rows) and a 4X pixel is
-  // two 2X pixels wide, so 4X draws are scaled horizontally by 2 (see draw.cpp). The game clears the
-  // start of each strip in 4X and the rest in 2X before drawing the scene in 2X: separate images left
-  // most of the scene uncleared (bands at the strip ends).
+  // 4X has no image of its own: it draws into the 1X or 2X image of the same EDRAM tiles. A tile holds
+  // 80x16 samples in every mode, so with the same pitch in tiles a 4X pixel (2x2 samples) is two 2X
+  // pixels wide, or 2x2 1X pixels (draw.cpp scales). The game clears the start of each surface in 4X and
+  // the rest in the surface's own mode, right before drawing in that mode: the image of that EDRAM area
+  // used last is the one the clear belongs to. Separate 4X images left most surfaces uncleared (bands
+  // at the strip ends in 2X, stale depth hiding parts of the menu's models in 1X).
   RenderTargetKey key = requested;
   if (key.msaa == uint32_t(xenos::MsaaSamples::k4X)) {
+    NativeImage* best = nullptr;
+    for (auto& [other_key, image] : targets_) {
+      if (other_key.base_tiles == key.base_tiles && other_key.pitch_tiles == key.pitch_tiles &&
+          other_key.format == key.format && other_key.is_depth == key.is_depth &&
+          (!best || image->last_use > best->last_use)) {
+        best = image.get();
+      }
+    }
+    if (best) {
+      return best;
+    }
     key.msaa = uint32_t(xenos::MsaaSamples::k2X);
   }
   auto it = targets_.find(key);
   if (it != targets_.end()) {
+    it->second->last_use = ++use_counter_;
     return it->second.get();
   }
   const auto msaa = xenos::MsaaSamples(key.msaa);
@@ -214,6 +228,8 @@ NativeImage* NativeTargets::GetRenderTarget(const RenderTargetKey& requested) {
   REXGPU_INFO("[native] render target {}: base {} pitch {} tiles, format {}, msaa {} -> {}x{}",
               targets_.size() + 1, key.base_tiles, key.pitch_tiles, key.format, key.msaa, width,
               height);
+  image->msaa = key.msaa;
+  image->last_use = ++use_counter_;
   NativeImage* result = image.get();
   targets_.emplace(key, std::move(image));
   return result;

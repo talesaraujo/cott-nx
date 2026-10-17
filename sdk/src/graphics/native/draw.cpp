@@ -662,12 +662,17 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
       target_extent.height = std::min(target_extent.height, target->height);
     }
   }
-  // 4X draws go to the 2X image of the same EDRAM area, two image pixels per guest pixel horizontally
-  // (NativeTargets::GetRenderTarget). Everything below is in guest pixels until the viewport and the
-  // scissor are scaled at the end.
-  const uint32_t scale_x =
-      regs.Get<reg::RB_SURFACE_INFO>().msaa_samples == xenos::MsaaSamples::k4X ? 2 : 1;
-  const VkExtent2D extent = {target_extent.width / scale_x, target_extent.height};
+  // 4X draws go to the 1X or 2X image of the same EDRAM area (NativeTargets::GetRenderTarget): a 4X
+  // pixel is 2 image pixels wide, and 2 high in a 1X image. Everything below is in guest pixels until
+  // the viewport and the scissor are scaled at the end.
+  uint32_t scale_x = 1, scale_y = 1;
+  if (regs.Get<reg::RB_SURFACE_INFO>().msaa_samples == xenos::MsaaSamples::k4X) {
+    scale_x = 2;
+    for (NativeImage* target : targets) {
+      if (target && target->msaa == uint32_t(xenos::MsaaSamples::k1X)) scale_y = 2;
+    }
+  }
+  const VkExtent2D extent = {target_extent.width / scale_x, target_extent.height / scale_y};
 
   // Scissor (MojoRecomp DecodeScissor): window scissor moved by the window offset, then the screen one.
   const uint32_t window_tl = regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL];
@@ -696,8 +701,8 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
     }
     return true;  // Fully clipped (another strip's part of the screen).
   }
-  const VkRect2D scissor = {{sx0 * int32_t(scale_x), sy0},
-                            {uint32_t(sx1 - sx0) * scale_x, uint32_t(sy1 - sy0)}};
+  const VkRect2D scissor = {{sx0 * int32_t(scale_x), sy0 * int32_t(scale_y)},
+                            {uint32_t(sx1 - sx0) * scale_x, uint32_t(sy1 - sy0) * scale_y}};
 
   // Window offset applied to vertices (PA_SU_SC_MODE_CNTL::vtx_window_offset_enable).
   int32_t window_x = 0, window_y = 0;
@@ -733,6 +738,8 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   }
   viewport.x *= float(scale_x);
   viewport.width *= float(scale_x);
+  viewport.y *= float(scale_y);
+  viewport.height *= float(scale_y);
   if (!std::isfinite(viewport.x) || !std::isfinite(viewport.y) || !std::isfinite(viewport.width) ||
       !std::isfinite(viewport.height) || viewport.width <= 0.0f || viewport.height <= 0.0f) {
     return true;  // Degenerate: no coverage.
@@ -773,9 +780,15 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   const uint32_t index_offset = regs[XE_GPU_REG_VGT_INDX_OFFSET] & 0xFFFFFF;
   const uint32_t min_vertex = regs[XE_GPU_REG_VGT_MIN_VTX_INDX] & 0xFFFFFF;
   const uint32_t max_vertex = regs[XE_GPU_REG_VGT_MAX_VTX_INDX] & 0xFFFFFF;
+  uint32_t clamped_indices = 0, raw_lo = UINT32_MAX, raw_hi = 0;
   auto remap = [&](uint32_t index) {
     uint32_t v = (index + index_offset) & 0xFFFFFF;
-    if (min_vertex <= max_vertex) v = std::clamp(v, min_vertex, max_vertex);
+    raw_lo = std::min(raw_lo, v);
+    raw_hi = std::max(raw_hi, v);
+    if (min_vertex <= max_vertex && (v < min_vertex || v > max_vertex)) {
+      v = std::clamp(v, min_vertex, max_vertex);
+      ++clamped_indices;
+    }
     return v;
   };
   constexpr uint32_t kRestart = UINT32_MAX;
@@ -821,6 +834,22 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   }
   if (lo > hi) {
     return true;
+  }
+
+  if (trace_frame_) {
+    REXGPU_INFO("[native trace]   indices {} ({}-bit, endian {}): {}..{}, clamp {}..{} changed {}, "
+                "offset {}",
+                index_count, index_buffer_info && index_buffer_info->format ==
+                                     xenos::IndexFormat::kInt32 ? 32 : 16,
+                index_buffer_info ? uint32_t(index_buffer_info->endianness) : 0, raw_lo, raw_hi,
+                min_vertex, max_vertex, clamped_indices, index_offset);
+    for (const NativeVertexAttribute& a : vs->attributes) {
+      const xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(a.fetch_slot);
+      REXGPU_INFO("[native trace]   attribute {}: fetch {} at {:08X} size {} dwords endian {}, "
+                  "format {} stride {} offset {}",
+                  a.location, a.fetch_slot, fetch.address << 2, uint32_t(fetch.size),
+                  uint32_t(fetch.endian), a.format, a.stride_dwords, a.offset_dwords);
+    }
   }
 
   // Rectangles: three corners each; the fourth is rebuilt on the CPU (below) from the diagonal, found as
@@ -906,6 +935,15 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
       if (slot >= kTextureSlots) continue;
       const xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(slot);
       textures_.Prepare(cb, fetch, targets_, [this]() { EndRendering(); }, bindings[slot]);
+      if (trace_frame_) {
+        REXGPU_INFO("[native trace]   {} slot {}: {:08X} format {} {}x{} swizzle {:03X} tiled {} "
+                    "endian {} mips {} {}",
+                    shader == ps ? "PS" : "VS", slot, fetch.base_address << 12,
+                    uint32_t(fetch.format), fetch.size_2d.width + 1, fetch.size_2d.height + 1,
+                    uint32_t(fetch.swizzle), uint32_t(fetch.tiled), uint32_t(fetch.endianness),
+                    uint32_t(fetch.mip_max_level),
+                    targets_.FindTexture(fetch.base_address << 12) ? "resolved" : "memory");
+      }
       if (shader == ps && traced_shaders_.insert(ps->hash ^ slot).second) {
         NativeImage* resolved = targets_.FindTexture(fetch.base_address << 12);
         REXGPU_DEBUG("[native] PS {:016X} slot {}: {:08X} format {} {}x{} swizzle {:03X} tiled {} "
@@ -1195,7 +1233,7 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
     REXGPU_INFO("[native trace] draw {}: VS {:016X} PS {:016X} prim {} count {} targets {}/{}/{} "
                 "mask {:02X} depth {:08X} vte {:03X} win ({},{}) offs_en {} viewport {:.0f},{:.0f} "
                 "{:.0f}x{:.0f} scissor {},{} {}x{} extent {}x{} v0 ({:.1f},{:.1f},{:.2f},{:.2f}) "
-                "blend {:08X}",
+                "blend {:08X} alpha test {} ref {:.3f} cull {:X}",
                 trace_draw_index_++, vs->hash, ps ? ps->hash : 0, uint32_t(prim_type), index_count,
                 targets[0] ? fmt::format("C0@{}", regs[XE_GPU_REG_RB_COLOR_INFO] & 0xFFF) : "-",
                 targets[1] ? fmt::format("C1@{}", regs[XE_GPU_REG_RB_COLOR1_INFO] & 0xFFF) : "-",
@@ -1203,7 +1241,8 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
                 color_mask, key.depth_control, vte, window_x, window_y, (su_sc_mode >> 16) & 1,
                 viewport.x, viewport.y, viewport.width, viewport.height, scissor.offset.x,
                 scissor.offset.y, scissor.extent.width, scissor.extent.height, extent.width,
-                extent.height, first[0], first[1], first[2], first[3], key.blend0);
+                extent.height, first[0], first[1], first[2], first[3], key.blend0, alpha_test,
+                F32(regs[XE_GPU_REG_RB_ALPHA_REF]), su_sc_mode & 7);
   }
 
   // 9. The draw.
@@ -1269,8 +1308,8 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
       for (uint32_t i = 0; i < 4; ++i) {
         value.color.float32[i] = float((bits >> (i * 8)) & 0xFF) * (1.0f / 255.0f);
       }
-      const VkRect2D area = {{x0 * int32_t(scale_x), y0},
-                             {uint32_t(x1 - x0) * scale_x, uint32_t(y1 - y0)}};
+      const VkRect2D area = {{x0 * int32_t(scale_x), y0 * int32_t(scale_y)},
+                             {uint32_t(x1 - x0) * scale_x, uint32_t(y1 - y0) * scale_y}};
       EndRendering();
       for (NativeImage* color : aliases) {
         targets_.Transition(cb, *color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);

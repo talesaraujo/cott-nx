@@ -67,6 +67,10 @@ struct NativeImage {
   // trade places. The image keeps the render target's order; sampling swaps them (the game's fetch
   // swizzle swaps them back).
   bool swap_red_blue = false;
+  // Render targets only: the image's MSAA mode (1X or 2X; 4X surfaces draw into one of those) and when
+  // a draw or resolve last used it with its own mode.
+  uint32_t msaa = 0;
+  uint64_t last_use = 0;
 };
 
 class NativeTargets {
@@ -148,6 +152,7 @@ class NativeTargets {
   std::unordered_set<uint32_t> skip_reasons_logged_;
   uint64_t resolves_ = 0;
   uint64_t skipped_ = 0;
+  uint64_t use_counter_ = 0;
 };
 
 }  // namespace rex::graphics::native
