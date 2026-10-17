@@ -202,7 +202,9 @@ NativeImage* NativeTargets::GetRenderTarget(const RenderTargetKey& requested) {
   if (key.is_depth) {
     format = VK_FORMAT_D32_SFLOAT_S8_UINT;
     aspect = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
-    usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    // Not a transfer destination: on the Switch NVK only gives depth images ZCULL (hidden pixels
+    // skipped before shading) without TRANSFER_DST. Depth is cleared by rendering, never copied into.
+    usage = (usage & ~VK_IMAGE_USAGE_TRANSFER_DST_BIT) | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
   } else {
     switch (xenos::ColorRenderTargetFormat(key.format)) {
       case xenos::ColorRenderTargetFormat::k_8_8_8_8:
