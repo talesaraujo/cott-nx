@@ -55,7 +55,10 @@ class NativeCommandProcessor : public CommandProcessor {
     VkCommandPool pool = VK_NULL_HANDLE;
     VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
+    // Two GPU timestamps, at the start and the end of the frame's command buffer.
+    VkQueryPool timestamps = VK_NULL_HANDLE;
     bool submitted = false;
+    std::chrono::steady_clock::time_point submit_time;
   };
   static constexpr size_t kFrameSlots = 3;
   std::array<FrameSlot, kFrameSlots> slots_{};
@@ -107,6 +110,10 @@ class NativeCommandProcessor : public CommandProcessor {
   std::array<VkSampler, 16> last_samplers_{};
   VkDescriptorSet last_sets_[2] = {};
 
+  // The last shared constants block uploaded in this frame, reused while a draw's is the same.
+  std::array<uint8_t, 1024> shared_scratch_{}, last_shared_{};
+  VkDeviceSize last_shared_offset_ = VK_WHOLE_SIZE;
+
   bool rendering_ = false;
   NativeImage* rendering_targets_[3] = {};  // color 0, color 1, depth
   VkExtent2D rendering_extent_ = {};
@@ -138,6 +145,16 @@ class NativeCommandProcessor : public CommandProcessor {
   uint64_t draws_ = 0, copies_ = 0, swaps_ = 0;
   uint64_t report_draws_ = 0, report_copies_ = 0, report_swaps_ = 0;
   std::chrono::steady_clock::time_point report_start_;
+  // Where a frame's time goes (the report): GPU time between the frame's two timestamps, the ring
+  // thread's waits for a free slot, its time recording a frame (first command to submit), and the
+  // time from a frame's submit to the end of its fence wait.
+  PFN_vkCmdWriteTimestamp cmd_write_timestamp_ = nullptr;
+  PFN_vkGetQueryPoolResults get_query_pool_results_ = nullptr;
+  double timestamp_period_ns_ = 0.0;
+  uint64_t timestamp_mask_ = 0;
+  double gpu_ns_ = 0.0, slot_wait_ns_ = 0.0, record_ns_ = 0.0;
+  uint64_t gpu_frames_ = 0;
+  std::chrono::steady_clock::time_point record_start_;
 };
 
 }  // namespace rex::graphics::native

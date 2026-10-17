@@ -90,6 +90,9 @@ class NativeTextures {
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     uint64_t content_hash = 0;
     uint64_t checked_frame = UINT64_MAX;
+    // Content that stayed the same is checked less often: every 2, 4, 8, then 16 frames.
+    uint64_t next_check_frame = 0;
+    uint32_t stable_checks = 0;
     bool uploaded = false;
     std::unordered_map<uint32_t, VkImageView> views;  // by swizzle
   };

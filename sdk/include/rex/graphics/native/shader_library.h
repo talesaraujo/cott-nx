@@ -49,6 +49,9 @@ struct NativeShader {
   std::vector<uint32_t> texture_slots;
   std::vector<uint32_t> texture_dimensions;
   bool uses_alu_constants = false;
+  // Float constants the shader can read: one past the highest index, or all 256 with relative
+  // addressing. Only these are uploaded for each draw.
+  uint32_t constant_count = 256;
   // Pixel shaders: the color outputs written (bit per render target).
   uint32_t color_output_mask = 0;
 };

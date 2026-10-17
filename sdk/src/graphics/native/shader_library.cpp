@@ -4,6 +4,7 @@
  */
 #include <rex/graphics/native/shader_library.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <fstream>
@@ -260,6 +261,13 @@ bool NativeShaderLibrary::Load(NativeShader& shader) {
   }
   const JsonValue* alu = json.Find("aluConsts");
   shader.uses_alu_constants = (alu && !alu->array.empty()) || json.Int("aluDynamic");
+  if (!json.Int("aluDynamic")) {
+    uint32_t count = 0;
+    if (alu) {
+      for (const JsonValue& v : alu->array) count = std::max(count, uint32_t(v.number) + 1);
+    }
+    shader.constant_count = std::min(count, 256u);
+  }
   if (shader.is_pixel) {
     shader.color_output_mask = ScanColorOutputs(spirv);
   }

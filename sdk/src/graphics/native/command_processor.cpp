@@ -15,6 +15,7 @@
 #include <rex/platform.h>
 #include <rex/ui/presenter.h>
 #include <rex/ui/vulkan/device.h>
+#include <rex/ui/vulkan/instance.h>
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/provider.h>
 #include <rex/ui/vulkan/util.h>
@@ -22,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <vector>
 
 #include <rex/cvar.h>
 
@@ -70,7 +72,40 @@ ui::vulkan::VulkanDevice* NativeCommandProcessor::vulkan_device() const {
 bool NativeCommandProcessor::CreateFrameSlots() {
   const ui::vulkan::VulkanDevice* const device = vulkan_device();
   const ui::vulkan::VulkanDevice::Functions& dfn = device->functions();
+  // GPU timestamps for the report. The device function table leaves these entry points out.
+  {
+    const auto& ifn = device->vulkan_instance()->functions();
+    cmd_write_timestamp_ =
+        PFN_vkCmdWriteTimestamp(ifn.vkGetDeviceProcAddr(device->device(), "vkCmdWriteTimestamp"));
+    get_query_pool_results_ = PFN_vkGetQueryPoolResults(
+        ifn.vkGetDeviceProcAddr(device->device(), "vkGetQueryPoolResults"));
+    VkPhysicalDeviceProperties properties;
+    ifn.vkGetPhysicalDeviceProperties(device->physical_device(), &properties);
+    timestamp_period_ns_ = properties.limits.timestampPeriod;
+    uint32_t family_count = 0;
+    ifn.vkGetPhysicalDeviceQueueFamilyProperties(device->physical_device(), &family_count, nullptr);
+    std::vector<VkQueueFamilyProperties> families(family_count);
+    ifn.vkGetPhysicalDeviceQueueFamilyProperties(device->physical_device(), &family_count,
+                                                 families.data());
+    const uint32_t family = device->queue_family_graphics_compute();
+    const uint32_t bits = family < family_count ? families[family].timestampValidBits : 0;
+    timestamp_mask_ = bits >= 64 ? ~uint64_t(0) : (uint64_t(1) << bits) - 1;
+    if (!bits || !cmd_write_timestamp_ || !get_query_pool_results_) {
+      cmd_write_timestamp_ = nullptr;
+      REXGPU_WARN("[native] no GPU timestamps: the report leaves GPU time out");
+    }
+  }
   for (FrameSlot& slot : slots_) {
+    if (cmd_write_timestamp_) {
+      VkQueryPoolCreateInfo query_info = {};
+      query_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+      query_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+      query_info.queryCount = 2;
+      if (dfn.vkCreateQueryPool(device->device(), &query_info, nullptr, &slot.timestamps) !=
+          VK_SUCCESS) {
+        slot.timestamps = VK_NULL_HANDLE;
+      }
+    }
     VkCommandPoolCreateInfo pool_info = {};
     pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
@@ -107,6 +142,7 @@ void NativeCommandProcessor::DestroyFrameSlots() {
       dfn.vkWaitForFences(device->device(), 1, &slot.fence, VK_TRUE, UINT64_MAX);
     }
     if (slot.fence) dfn.vkDestroyFence(device->device(), slot.fence, nullptr);
+    if (slot.timestamps) dfn.vkDestroyQueryPool(device->device(), slot.timestamps, nullptr);
     if (slot.pool) dfn.vkDestroyCommandPool(device->device(), slot.pool, nullptr);
     slot = FrameSlot{};
   }
@@ -117,15 +153,32 @@ VkCommandBuffer NativeCommandProcessor::BeginSlot() {
   const ui::vulkan::VulkanDevice::Functions& dfn = device->functions();
   FrameSlot& slot = slots_[slot_index_];
   if (slot.submitted) {
+    const auto wait_start = std::chrono::steady_clock::now();
     dfn.vkWaitForFences(device->device(), 1, &slot.fence, VK_TRUE, UINT64_MAX);
+    slot_wait_ns_ += std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() -
+                                                               wait_start)
+                         .count();
     dfn.vkResetFences(device->device(), 1, &slot.fence);
     slot.submitted = false;
+    if (slot.timestamps) {
+      uint64_t ticks[2];
+      if (get_query_pool_results_(device->device(), slot.timestamps, 0, 2, sizeof(ticks), ticks,
+                                  sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+        gpu_ns_ += double((ticks[1] - ticks[0]) & timestamp_mask_) * timestamp_period_ns_;
+        ++gpu_frames_;
+      }
+    }
   }
   dfn.vkResetCommandPool(device->device(), slot.pool, 0);
   VkCommandBufferBeginInfo begin_info = {};
   begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   dfn.vkBeginCommandBuffer(slot.command_buffer, &begin_info);
+  if (slot.timestamps) {
+    dfn.vkCmdResetQueryPool(slot.command_buffer, slot.timestamps, 0, 2);
+    cmd_write_timestamp_(slot.command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, slot.timestamps, 0);
+  }
+  record_start_ = std::chrono::steady_clock::now();
   return slot.command_buffer;
 }
 
@@ -133,7 +186,14 @@ bool NativeCommandProcessor::SubmitSlot() {
   ui::vulkan::VulkanDevice* const device = vulkan_device();
   const ui::vulkan::VulkanDevice::Functions& dfn = device->functions();
   FrameSlot& slot = slots_[slot_index_];
+  if (slot.timestamps) {
+    cmd_write_timestamp_(slot.command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, slot.timestamps,
+                         1);
+  }
   dfn.vkEndCommandBuffer(slot.command_buffer);
+  record_ns_ +=
+      std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - record_start_)
+          .count();
   VkSubmitInfo submit_info = {};
   submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
   submit_info.commandBufferCount = 1;
@@ -348,13 +408,18 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     REXGPU_INFO("[native] {:.1f} swaps/s, {:.0f} draws ({:.0f} drawn) and {:.1f} copies per frame; "
                 "{} guest shaders, {} translated, {} pipelines; {} texture uploads ({} MB); "
                 "{} draws and {} resolves skipped in total; upload {} of {} MB (front buffer "
-                "{:08X})",
+                "{:08X}); per frame: GPU {:.1f} ms, recording {:.1f} ms, waiting for a slot "
+                "{:.1f} ms",
                 swaps / seconds, swaps ? double(draws_ - report_draws_) / swaps : 0.0,
                 swaps ? double(draws_done_ - report_draws_done_) / swaps : 0.0,
                 swaps ? double(copies_ - report_copies_) / swaps : 0.0, shaders_.size(),
                 shader_library_.loaded(), pipelines_.size(), textures_.uploads(),
                 textures_.upload_bytes() >> 20, draws_skipped_, targets_.skipped(),
-                upload_.used() >> 20, upload_.capacity() >> 20, frontbuffer_ptr);
+                upload_.used() >> 20, upload_.capacity() >> 20, frontbuffer_ptr,
+                gpu_frames_ ? gpu_ns_ / gpu_frames_ * 1e-6 : 0.0,
+                swaps ? record_ns_ / swaps * 1e-6 : 0.0, swaps ? slot_wait_ns_ / swaps * 1e-6 : 0.0);
+    gpu_ns_ = record_ns_ = slot_wait_ns_ = 0.0;
+    gpu_frames_ = 0;
     report_draws_done_ = draws_done_;
     report_start_ = now;
     report_draws_ = draws_;

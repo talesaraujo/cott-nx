@@ -52,7 +52,6 @@ namespace {
 
 constexpr uint32_t kTextureSlots = 16;
 constexpr uint32_t kDescriptorSetsPerSlot = 2048;
-constexpr VkDeviceSize kConstantsBytes = 4096;  // 256 float4 per stage
 constexpr VkDeviceSize kSharedBytes = 1024;
 
 // Offsets in the shared constants (MojoRecomp vk_presenter.cpp, kShared*).
@@ -389,6 +388,7 @@ void NativeCommandProcessor::BeginSlotDrawState() {
   last_views_.fill(VK_NULL_HANDLE);
   last_samplers_.fill(VK_NULL_HANDLE);
   last_sets_[0] = last_sets_[1] = VK_NULL_HANDLE;
+  last_shared_offset_ = VK_WHOLE_SIZE;
   textures_.BeginFrame();
   textures_.InitializeDummies(frame_command_buffer_);
   rendering_ = false;
@@ -965,16 +965,20 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   }
 
   // 6. Upload memory: constants and vertices.
+  // Only the float constants each shader can read (most read a few dozen of the 256).
   VkDeviceSize vs_constants_offset, ps_constants_offset, shared_offset;
-  uint8_t* vs_constants = upload_.Allocate(kConstantsBytes, 256, vs_constants_offset);
-  uint8_t* ps_constants = upload_.Allocate(kConstantsBytes, 256, ps_constants_offset);
-  uint8_t* shared = upload_.Allocate(kSharedBytes, 256, shared_offset);
-  if (!vs_constants || !ps_constants || !shared) {
+  const VkDeviceSize vs_constants_bytes = std::max(1u, vs->constant_count) * 16;
+  const VkDeviceSize ps_constants_bytes = std::max(1u, ps ? ps->constant_count : 1u) * 16;
+  uint8_t* vs_constants = upload_.Allocate(vs_constants_bytes, 256, vs_constants_offset);
+  uint8_t* ps_constants = upload_.Allocate(ps_constants_bytes, 256, ps_constants_offset);
+  if (!vs_constants || !ps_constants) {
     SkipDraw(6, "upload memory full for this frame (raise native_upload_mb)");
     return true;
   }
-  std::memcpy(vs_constants, &regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X], kConstantsBytes);
-  std::memcpy(ps_constants, &regs.values[XE_GPU_REG_SHADER_CONSTANT_256_X], kConstantsBytes);
+  std::memcpy(vs_constants, &regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X], vs_constants_bytes);
+  std::memcpy(ps_constants, &regs.values[XE_GPU_REG_SHADER_CONSTANT_256_X], ps_constants_bytes);
+  static_assert(sizeof(shared_scratch_) == kSharedBytes);
+  uint8_t* shared = shared_scratch_.data();
 
   // Shared constants (MojoRecomp UploadShared).
   std::memset(shared, 0, kSharedBytes);
@@ -1049,6 +1053,19 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   const float alpha_threshold = F32(regs[XE_GPU_REG_RB_ALPHA_REF]);
   std::memcpy(shared + kSharedAlphaThreshold, &alpha_threshold, 4);
   std::memcpy(shared + kSharedTextureSampleScales, sample_scales, sizeof(sample_scales));
+  if (last_shared_offset_ != VK_WHOLE_SIZE &&
+      !std::memcmp(shared_scratch_.data(), last_shared_.data(), kSharedBytes)) {
+    shared_offset = last_shared_offset_;
+  } else {
+    uint8_t* out = upload_.Allocate(kSharedBytes, 256, shared_offset);
+    if (!out) {
+      SkipDraw(6, "upload memory full for this frame (raise native_upload_mb)");
+      return true;
+    }
+    std::memcpy(out, shared_scratch_.data(), kSharedBytes);
+    last_shared_ = shared_scratch_;
+    last_shared_offset_ = shared_offset;
+  }
 
   // Vertices: each fetch the shader reads, from the lowest to the highest vertex used, swapped to little
   // endian once per fetch constant and stride.

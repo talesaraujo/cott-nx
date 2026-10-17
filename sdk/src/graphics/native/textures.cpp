@@ -489,8 +489,9 @@ void NativeTextures::Prepare(VkCommandBuffer cb, const xenos::xe_gpu_texture_fet
     return;
   }
 
-  // The bytes it covers, hashed once a frame.
-  if (texture->checked_frame != frame_) {
+  // The bytes it covers, hashed at most once a frame, and less often while they do not change (the
+  // hash was a tenth of the ring thread on the Switch). Videos change every frame and stay checked.
+  if (texture->checked_frame != frame_ && frame_ >= texture->next_check_frame) {
     texture->checked_frame = frame_;
     const texture_util::TextureGuestLayout layout = texture_util::GetGuestTextureLayout(
         xenos::DataDimension::k2DOrStacked, fetch.pitch, width, height, 1, fetch.tiled, fetch.format,
@@ -506,9 +507,14 @@ void NativeTextures::Prepare(VkCommandBuffer cb, const xenos::xe_gpu_texture_fet
       before_commands();
       if (Upload(cb, fetch, *texture, width, height, base_page, mip_page)) {
         texture->content_hash = hash;
+        texture->stable_checks = 0;
+        texture->next_check_frame = frame_ + 1;
       } else {
         texture->checked_frame = UINT64_MAX;  // Upload memory full: try again in the next frame.
       }
+    } else {
+      texture->stable_checks = std::min(texture->stable_checks + 1, 4u);
+      texture->next_check_frame = frame_ + (uint64_t(1) << texture->stable_checks);
     }
   }
   if (!texture->uploaded) {
