@@ -79,6 +79,7 @@ class NativeCommandProcessor : public CommandProcessor {
   bool Draw(xenos::PrimitiveType prim_type, uint32_t index_count,
             const IndexBufferInfo* index_buffer_info);
   void SkipDraw(uint32_t reason, const char* text);
+  void CaptureMissingShader(const Shader& shader, bool is_pixel);
   // Ends the current rendering pass (before transfers, barriers and the end of the frame).
   void EndRendering();
 
@@ -119,6 +120,8 @@ class NativeCommandProcessor : public CommandProcessor {
   uint32_t trace_draw_index_ = 0;
   // Pixel shader texture slots already described in the log (hash ^ slot).
   std::unordered_set<uint64_t> traced_shaders_;
+  // Missing shaders already saved (native_shader_capture_path).
+  std::unordered_set<uint64_t> captured_shaders_;
   uint64_t draws_done_ = 0, draws_skipped_ = 0, report_draws_done_ = 0;
 
   bool CreateFrameSlots();

@@ -276,6 +276,17 @@ std::vector<NativeImage*> NativeTargets::Aliases(NativeImage* image, uint32_t ba
   return result;
 }
 
+std::vector<NativeImage*> NativeTargets::ColorImagesAt(uint32_t base_tiles, uint32_t width) {
+  std::vector<NativeImage*> result;
+  for (auto& [key, image] : targets_) {
+    if (!key.is_depth && key.base_tiles == base_tiles && image->width == width &&
+        image->format == VK_FORMAT_R8G8B8A8_UNORM) {
+      result.push_back(image.get());
+    }
+  }
+  return result;
+}
+
 NativeImage* NativeTargets::FindTexture(uint32_t base) {
   auto it = destinations_.find(base);
   return it != destinations_.end() ? it->second.get() : nullptr;

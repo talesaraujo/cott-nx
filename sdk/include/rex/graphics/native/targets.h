@@ -84,6 +84,9 @@ class NativeTargets {
   // RB_DEPTH_INFO (same images the resolves read). Null when the format is not supported yet.
   NativeImage* GetColorTarget(const RegisterFile& regs, uint32_t index);
   NativeImage* GetDepthTarget(const RegisterFile& regs);
+  // The RGBA8 color render targets that start at an EDRAM base with a given image width (the depth
+  // surface's, so the tile layout matches).
+  std::vector<NativeImage*> ColorImagesAt(uint32_t base_tiles, uint32_t width);
 
   // The destination texture whose guest base is exactly `base`, or null.
   NativeImage* FindTexture(uint32_t base);

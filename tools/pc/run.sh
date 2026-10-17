@@ -12,4 +12,4 @@ LOG="$ROOT/logs/pc/run_$(date +%Y%m%d_%H%M%S).log"
 cp -u "$ROOT"/sdk/out/linux-amd64/librexgpu-*.so "$BUILD"/ 2>/dev/null || true
 export LD_LIBRARY_PATH="$BUILD:$ROOT/sdk/out/linux-amd64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 echo "log: $LOG"
-exec "$BUILD/cott" --game_data_root="$ROOT/assets/game_root" --gpu_plugin=xenos --mnk_mode=true --render_target_path_vulkan=fsi --native_shader_path="$ROOT/build/shaders/spv" --log_file="$LOG" "$@"
+exec "$BUILD/cott" --game_data_root="$ROOT/assets/game_root" --gpu_plugin=xenos --mnk_mode=true --render_target_path_vulkan=fsi --native_shader_path="$ROOT/build/shaders/spv" --native_shader_capture_path="$ROOT/build/shaders/ucode" --log_file="$LOG" "$@"

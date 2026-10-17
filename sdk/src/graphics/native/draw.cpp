@@ -17,15 +17,19 @@
 #include <rex/graphics/native/command_processor.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
+#include <fmt/format.h>
 #include <xxhash.h>
 
 #include <rex/cvar.h>
 #include <rex/graphics/register_file.h>
 #include <rex/graphics/registers.h>
 #include <rex/logging.h>
+#include <rex/memory/utils.h>
 #include <rex/system/xmemory.h>
 #include <rex/ui/vulkan/device.h>
 #include <rex/ui/vulkan/provider.h>
@@ -35,6 +39,9 @@ REXCVAR_DEFINE_STRING(native_shader_path, "", "GPU/Native",
                       "Folder with the translated shaders (vs_/ps_<hash>.spv and .meta.json, made by "
                       "tools/shaders)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(native_shader_capture_path, "", "GPU/Native",
+                      "Folder where the microcode of shaders missing from native_shader_path is saved "
+                      "(vs_/ps_<hash>.ucode, the translator's input)");
 REXCVAR_DEFINE_INT32(native_upload_mb, 48, "GPU/Native",
                      "Upload memory per frame in flight (constants, vertices, textures), in MB")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -238,6 +245,26 @@ void NativeCommandProcessor::SkipDraw(uint32_t reason, const char* text) {
   ++draws_skipped_;
   if (draw_skips_logged_.insert(reason).second) {
     REXGPU_WARN("[native] draw skipped: {} (first time; reason {})", text, reason);
+  }
+}
+
+void NativeCommandProcessor::CaptureMissingShader(const Shader& shader, bool is_pixel) {
+  // The microcode in the form tools/shaders/xsh_extract.py writes (guest big-endian dwords), so the
+  // translator can add it to the library. In this mode the xenos plugin's shader storage stays closed.
+  const std::string dir = REXCVAR_GET(native_shader_capture_path);
+  if (dir.empty() || !captured_shaders_.insert(shader.ucode_data_hash()).second) {
+    return;
+  }
+  std::vector<uint32_t> ucode(shader.ucode_dword_count());
+  memory::copy_and_swap(ucode.data(), shader.ucode_dwords(), ucode.size());
+  const std::string path =
+      fmt::format("{}/{}_{:016X}.ucode", dir, is_pixel ? "ps" : "vs", shader.ucode_data_hash());
+  if (FILE* file = std::fopen(path.c_str(), "wb")) {
+    std::fwrite(ucode.data(), sizeof(uint32_t), ucode.size(), file);
+    std::fclose(file);
+    REXGPU_WARN("[native] captured the missing shader into {} (translate it with tools/shaders)", path);
+  } else {
+    REXGPU_WARN("[native] could not write {}", path);
   }
 }
 
@@ -577,6 +604,8 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   const bool color_pass = mode == xenos::EdramMode::kColorDepth && guest_ps;
   NativeShader* ps = color_pass ? shader_library_.Get(guest_ps->ucode_data_hash(), true) : nullptr;
   if (!vs || (color_pass && !ps)) {
+    if (!vs) CaptureMissingShader(*guest_vs, false);
+    if (color_pass && !ps) CaptureMissingShader(*guest_ps, true);
     SkipDraw(3, "translated shader missing (see the warning above)");
     return true;
   }
@@ -800,6 +829,9 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   std::vector<uint32_t>& host_indices = draw_host_indices_;
   host_indices.clear();
   std::vector<uint32_t> rectangle_order;  // per rectangle: other, diagonal A, diagonal B (guest vertices)
+  // Bounds and depth of the rectangles, for the EDRAM alias of depth clears (step 10).
+  float rect_min[2] = {FLT_MAX, FLT_MAX}, rect_max[2] = {-FLT_MAX, -FLT_MAX};
+  float rect_z = NAN;
   if (rectangles) {
     const NativeVertexAttribute* position = nullptr;
     for (const NativeVertexAttribute& a : vs->attributes) {
@@ -815,15 +847,21 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
       uint32_t other = 2, diagonal_a = 0, diagonal_b = 1;
       if (position) {
         float xy[3][2];
+        const uint32_t position_dwords = position->format == 37 ? 2 : 3;
         for (uint32_t c = 0; c < 3; ++c) {
-          uint32_t words[2];
+          uint32_t words[3] = {};
           const uint32_t address = (position_fetch.address << 2) +
                                    corner[c] * position->stride_dwords * 4 +
                                    position->offset_dwords * 4;
-          CopySwapped(reinterpret_cast<uint8_t*>(words), physical + (address & 0x1FFFFFFF), 8,
-                      position_fetch.endian);
+          CopySwapped(reinterpret_cast<uint8_t*>(words), physical + (address & 0x1FFFFFFF),
+                      position_dwords * 4, position_fetch.endian);
           xy[c][0] = F32(words[0]);
           xy[c][1] = F32(words[1]);
+          for (uint32_t i = 0; i < 2; ++i) {
+            rect_min[i] = std::min(rect_min[i], xy[c][i]);
+            rect_max[i] = std::max(rect_max[i], xy[c][i]);
+          }
+          if (position_dwords == 3) rect_z = F32(words[2]);
         }
         auto distance = [&](uint32_t a, uint32_t b) {
           const float dx = xy[a][0] - xy[b][0], dy = xy[a][1] - xy[b][1];
@@ -1159,7 +1197,9 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
                 "{:.0f}x{:.0f} scissor {},{} {}x{} extent {}x{} v0 ({:.1f},{:.1f},{:.2f},{:.2f}) "
                 "blend {:08X}",
                 trace_draw_index_++, vs->hash, ps ? ps->hash : 0, uint32_t(prim_type), index_count,
-                targets[0] ? "C0" : "-", targets[1] ? "C1" : "-", targets[2] ? "D" : "-",
+                targets[0] ? fmt::format("C0@{}", regs[XE_GPU_REG_RB_COLOR_INFO] & 0xFFF) : "-",
+                targets[1] ? fmt::format("C1@{}", regs[XE_GPU_REG_RB_COLOR1_INFO] & 0xFFF) : "-",
+                targets[2] ? fmt::format("D@{}", regs[XE_GPU_REG_RB_DEPTH_INFO] & 0xFFF) : "-",
                 color_mask, key.depth_control, vte, window_x, window_y, (su_sc_mode >> 16) & 1,
                 viewport.x, viewport.y, viewport.width, viewport.height, scissor.offset.x,
                 scissor.offset.y, scissor.extent.width, scissor.extent.height, extent.width,
@@ -1203,6 +1243,61 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   dfn.vkCmdBindIndexBuffer(cb, upload_.buffer(), index_offset_bytes, VK_INDEX_TYPE_UINT32);
   dfn.vkCmdDrawIndexed(cb, uint32_t(host_indices.size()), 1, 0, 0, 0);
   ++draws_done_;
+
+  // 10. EDRAM aliasing of depth clears. Color and depth share the EDRAM, and the game clears some color
+  // surfaces (the motion blur's velocity, color 1 at the scene's end) by drawing a depth-only rectangle
+  // over them, in 4X, with ALWAYS: the color surface then holds the depth and stencil bits. Here each
+  // surface is its own image, so the color images at that base get the same bits over the rectangle.
+  if (rectangles && targets[2] && !targets[0] && !targets[1] && std::isfinite(rect_z) &&
+      !(vte & 1) && (key.depth_control & 6) == 6 && ((key.depth_control >> 4) & 7) == 7) {
+    const int32_t x0 = std::clamp(int32_t(std::lround(rect_min[0])) + window_x, sx0, sx1);
+    const int32_t x1 = std::clamp(int32_t(std::lround(rect_max[0])) + window_x, sx0, sx1);
+    const int32_t y0 = std::clamp(int32_t(std::lround(rect_min[1])) + window_y, sy0, sy1);
+    const int32_t y1 = std::clamp(int32_t(std::lround(rect_max[1])) + window_y, sy0, sy1);
+    const uint32_t depth_base = regs[XE_GPU_REG_RB_DEPTH_INFO] & 0xFFF;
+    std::vector<NativeImage*> aliases = targets_.ColorImagesAt(depth_base, targets[2]->width);
+    if (x1 > x0 && y1 > y0 && !aliases.empty()) {
+      const float z = std::clamp(rect_z, 0.0f, 1.0f);
+      const uint32_t depth24 = depth_float24 ? xenos::Float32To20e4(z, true)
+                                             : uint32_t(z * 16777215.0f + 0.5f);
+      // ZPASS = REPLACE writes the reference; otherwise assume the cleared stencil, 0.
+      const uint32_t stencil = ((key.depth_control & 1) && ((key.depth_control >> 14) & 7) == 2)
+                                   ? regs[XE_GPU_REG_RB_STENCILREFMASK] & 0xFF
+                                   : 0;
+      const uint32_t bits = (depth24 << 8) | stencil;
+      VkClearValue value = {};
+      for (uint32_t i = 0; i < 4; ++i) {
+        value.color.float32[i] = float((bits >> (i * 8)) & 0xFF) * (1.0f / 255.0f);
+      }
+      const VkRect2D area = {{x0 * int32_t(scale_x), y0},
+                             {uint32_t(x1 - x0) * scale_x, uint32_t(y1 - y0)}};
+      EndRendering();
+      for (NativeImage* color : aliases) {
+        targets_.Transition(cb, *color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VkRenderingAttachmentInfo attachment = {};
+        attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        attachment.imageView = color->view;
+        attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        attachment.clearValue = value;
+        VkRenderingInfo info = {};
+        info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+        info.renderArea = area;
+        info.layerCount = 1;
+        info.colorAttachmentCount = 1;
+        info.pColorAttachments = &attachment;
+        dfn.vkCmdBeginRendering(cb, &info);
+        dfn.vkCmdEndRendering(cb);
+      }
+      if (trace_frame_) {
+        REXGPU_INFO("[native trace]   depth clear aliased onto {} color image(s) at base {}: "
+                    "{},{} {}x{} bits {:08X}",
+                    aliases.size(), depth_base, area.offset.x, area.offset.y, area.extent.width,
+                    area.extent.height, bits);
+      }
+    }
+  }
   return true;
 }
 

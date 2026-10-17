@@ -215,6 +215,17 @@ bool NativeCommandProcessor::IssueCopy() {
   ++copies_;
   VkCommandBuffer cb = EnsureFrame();
   EndRendering();
+  if (trace_frame_) {
+    const RegisterFile& regs = *register_file_;
+    REXGPU_INFO("[native trace] copy after draw {}: control {:08X} color {:08X} depth {:08X} surface "
+                "{:08X} window offset {:08X} dest {:08X} info {:08X} pitch {:08X} window scissor "
+                "{:08X}-{:08X}",
+                trace_draw_index_, regs[XE_GPU_REG_RB_COPY_CONTROL], regs[XE_GPU_REG_RB_COLOR_INFO],
+                regs[XE_GPU_REG_RB_DEPTH_INFO], regs[XE_GPU_REG_RB_SURFACE_INFO],
+                regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET], regs[XE_GPU_REG_RB_COPY_DEST_BASE],
+                regs[XE_GPU_REG_RB_COPY_DEST_INFO], regs[XE_GPU_REG_RB_COPY_DEST_PITCH],
+                regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL], regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR]);
+  }
   targets_.Resolve(cb, *register_file_, *memory_);
   return true;
 }
