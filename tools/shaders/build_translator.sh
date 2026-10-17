@@ -55,8 +55,23 @@ for old, new in (('println("#define {}_Texture{}DescriptorIndex vk::RawBufferLoa
     assert old in s, 'shader_recompiler.cpp changed upstream'
     s = s.replace(old, new, 1)
 open(recompiler, 'w').write(s)
+# Linearize every shader whose jumps all go forward, not only the one MojoRecomp lists: XenosRecomp
+# emits shaders with jumps as a while (true) { switch (pc) } state machine that the GPU compiler cannot
+# optimize across, and the menu's 2D shader (ps_DD3269CF5A041FA2) is one. MojoRecomp's rewrite turns
+# each case into "if (pc <= N)"; it only needed the case count and the shader name generalized.
+t = open(translator_in).read()
+for old, new in (('    if (name != "ps_1bfff23dcd5c2d84")\n        return false;\n', ''),
+                 ('    std::array<size_t, 40> caseLines{};\n    caseLines.fill(SIZE_MAX);\n',
+                  '    std::vector<size_t> caseLines;\n'),
+                 ('            if (end && *end == \':\' && value < caseLines.size())\n                caseLines[value] = i;\n',
+                  '            if (!end || *end != \':\' || value != caseLines.size())\n                return false;\n            caseLines.push_back(i);\n'),
+                 ('    if (whileLine == SIZE_MAX)\n        return false;\n',
+                  '    if (whileLine == SIZE_MAX || caseLines.size() < 2)\n        return false;\n')):
+    assert old in t, 'shader_translator.cpp changed upstream: ' + old[:40]
+    t = t.replace(old, new, 1)
+open(translator_out, 'w').write(t)
+translator_in = translator_out
 if not ubo:
-    open(translator_out, 'w').write(open(translator_in).read())
     sys.exit(0)
 s = open(common).read()
 if 'COTT_UBO_CONSTANTS' not in s:
