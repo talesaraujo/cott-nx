@@ -23,6 +23,9 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fmt/format.h>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <rex/cvar.h>
@@ -56,6 +59,7 @@ bool NativeCommandProcessor::SetupContext() {
     REXGPU_ERROR("[native] base command processor context failed");
     return false;
   }
+  targets_.gpu_mark = [this](uint32_t kind) { GpuMark(kind); };
   if (!CreateFrameSlots() || !targets_.Initialize(vulkan_device()) || !CreateDrawObjects()) {
     return false;
   }
@@ -100,7 +104,7 @@ bool NativeCommandProcessor::CreateFrameSlots() {
       VkQueryPoolCreateInfo query_info = {};
       query_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
       query_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
-      query_info.queryCount = 2;
+      query_info.queryCount = kMaxGpuMarks;
       if (dfn.vkCreateQueryPool(device->device(), &query_info, nullptr, &slot.timestamps) !=
           VK_SUCCESS) {
         slot.timestamps = VK_NULL_HANDLE;
@@ -160,14 +164,65 @@ VkCommandBuffer NativeCommandProcessor::BeginSlot() {
                          .count();
     dfn.vkResetFences(device->device(), 1, &slot.fence);
     slot.submitted = false;
-    if (slot.timestamps) {
-      uint64_t ticks[2];
-      if (get_query_pool_results_(device->device(), slot.timestamps, 0, 2, sizeof(ticks), ticks,
-                                  sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
-        gpu_ns_ += double((ticks[1] - ticks[0]) & timestamp_mask_) * timestamp_period_ns_;
+    const uint32_t marks = uint32_t(slot.mark_kinds.size());
+    gpu_ticks_.resize(kMaxGpuMarks);
+    uint64_t* ticks = gpu_ticks_.data();
+    if (slot.timestamps && marks >= 2) {
+      if (get_query_pool_results_(device->device(), slot.timestamps, 0, marks,
+                                  sizeof(uint64_t) * marks, ticks, sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+        auto ns_between = [this](uint64_t from, uint64_t to) {
+          return double((to - from) & timestamp_mask_) * timestamp_period_ns_;
+        };
+        gpu_ns_ += ns_between(ticks[0], ticks[marks - 1]);
+        for (uint32_t i = 0; i + 1 < marks; ++i) {
+          gpu_kind_ns_[slot.mark_kinds[i]] += ns_between(ticks[i], ticks[i + 1]);
+        }
+        // GPU idle (or busy with other submissions, like the presenter's) between frames.
+        if (last_gpu_end_) gpu_gap_ns_ += ns_between(last_gpu_end_, ticks[0]);
+        last_gpu_end_ = ticks[marks - 1];
         ++gpu_frames_;
+        if (slot.profiled) {
+          // GPU time per shader pair in this frame, the heaviest first.
+          struct Sum {
+            double ns = 0.0;
+            uint32_t draws = 0, width = 0, height = 0;
+          };
+          std::unordered_map<uint64_t, Sum> sums;
+          std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> pairs;
+          double total = 0.0;
+          for (uint32_t i = 0; i + 1 < marks && i < slot.mark_draws.size(); ++i) {
+            const FrameSlot::DrawTag& tag = slot.mark_draws[i];
+            if (!tag.vs) continue;
+            const uint64_t key = tag.vs * 31 + tag.ps;
+            Sum& sum = sums[key];
+            const double ns = ns_between(ticks[i], ticks[i + 1]);
+            sum.ns += ns;
+            ++sum.draws;
+            sum.width = std::max(sum.width, tag.width);
+            sum.height = std::max(sum.height, tag.height);
+            pairs[key] = {tag.vs, tag.ps};
+            total += ns;
+          }
+          std::vector<std::pair<double, uint64_t>> order;
+          for (auto& [key, sum] : sums) order.emplace_back(sum.ns, key);
+          std::sort(order.rbegin(), order.rend());
+          std::string text;
+          for (size_t i = 0; i < order.size() && i < 10; ++i) {
+            const Sum& sum = sums[order[i].second];
+            const auto& pair = pairs[order[i].second];
+            text += fmt::format("\n    {:5.1f} ms  {:3} draws  VS {:016X} PS {:016X}  up to {}x{}",
+                                sum.ns * 1e-6, sum.draws, pair.first, pair.second, sum.width,
+                                sum.height);
+          }
+          REXGPU_INFO("[native] GPU profile of one frame: {:.1f} ms in {} draws{}", total * 1e-6,
+                      slot.mark_draws.size(), text);
+        }
       }
     }
+    slot.mark_kinds.clear();
+    slot.mark_draws.clear();
+    slot.profiled = false;
   }
   dfn.vkResetCommandPool(device->device(), slot.pool, 0);
   VkCommandBufferBeginInfo begin_info = {};
@@ -175,9 +230,13 @@ VkCommandBuffer NativeCommandProcessor::BeginSlot() {
   begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   dfn.vkBeginCommandBuffer(slot.command_buffer, &begin_info);
   if (slot.timestamps) {
-    dfn.vkCmdResetQueryPool(slot.command_buffer, slot.timestamps, 0, 2);
+    dfn.vkCmdResetQueryPool(slot.command_buffer, slot.timestamps, 0, kMaxGpuMarks);
     cmd_write_timestamp_(slot.command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, slot.timestamps, 0);
+    slot.mark_kinds.push_back(0);
+    slot.mark_draws.emplace_back();
+    slot.profiled = profile_frame_;
   }
+  gpu_kind_ = 0;
   record_start_ = std::chrono::steady_clock::now();
   return slot.command_buffer;
 }
@@ -186,9 +245,11 @@ bool NativeCommandProcessor::SubmitSlot() {
   ui::vulkan::VulkanDevice* const device = vulkan_device();
   const ui::vulkan::VulkanDevice::Functions& dfn = device->functions();
   FrameSlot& slot = slots_[slot_index_];
-  if (slot.timestamps) {
+  if (slot.timestamps && !slot.mark_kinds.empty()) {
     cmd_write_timestamp_(slot.command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, slot.timestamps,
-                         1);
+                         uint32_t(slot.mark_kinds.size()));
+    slot.mark_kinds.push_back(0);
+    slot.mark_draws.emplace_back();
   }
   dfn.vkEndCommandBuffer(slot.command_buffer);
   record_ns_ +=
@@ -214,6 +275,33 @@ bool NativeCommandProcessor::SubmitSlot() {
   }
   slot.submitted = true;
   return true;
+}
+
+void NativeCommandProcessor::GpuMark(uint32_t kind) {
+  FrameSlot& slot = slots_[slot_index_];
+  if (kind == gpu_kind_ || !frame_command_buffer_ || !slot.timestamps || slot.mark_kinds.empty() ||
+      slot.mark_kinds.size() + 1 >= kMaxGpuMarks) {
+    return;
+  }
+  // BOTTOM_OF_PIPE: the time the work recorded so far is done.
+  cmd_write_timestamp_(frame_command_buffer_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, slot.timestamps,
+                       uint32_t(slot.mark_kinds.size()));
+  slot.mark_kinds.push_back(uint8_t(kind));
+  slot.mark_draws.emplace_back();
+  gpu_kind_ = kind;
+}
+
+void NativeCommandProcessor::GpuMarkDraw(uint64_t vs, uint64_t ps, uint32_t width, uint32_t height) {
+  FrameSlot& slot = slots_[slot_index_];
+  if (!slot.profiled || !frame_command_buffer_ || !slot.timestamps || slot.mark_kinds.empty() ||
+      slot.mark_kinds.size() + 2 >= kMaxGpuMarks) {
+    return;
+  }
+  cmd_write_timestamp_(frame_command_buffer_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, slot.timestamps,
+                       uint32_t(slot.mark_kinds.size()));
+  slot.mark_kinds.push_back(0);
+  slot.mark_draws.push_back({vs, ps, width, height});
+  gpu_kind_ = 0;
 }
 
 VkCommandBuffer NativeCommandProcessor::EnsureFrame() {
@@ -287,6 +375,7 @@ bool NativeCommandProcessor::IssueCopy() {
                 regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL], regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR]);
   }
   targets_.Resolve(cb, *register_file_, *memory_);
+  GpuMark(0);
   return true;
 }
 
@@ -296,6 +385,8 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   RexSwitchPerfCount(0);
 #endif
   ++swaps_;
+  profile_frame_ = profile_next_frame_;
+  profile_next_frame_ = false;
   trace_frame_ = trace_next_frame_;
   trace_next_frame_ = false;
   trace_draw_index_ = 0;
@@ -318,6 +409,7 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
           const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device()->functions();
           VkCommandBuffer cb = EnsureFrame();
           EndRendering();
+          GpuMark(4);
           const VkImageSubresourceRange range = ui::vulkan::util::InitializeSubresourceRange();
 
           VkImageMemoryBarrier barrier = {};
@@ -408,8 +500,9 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     REXGPU_INFO("[native] {:.1f} swaps/s, {:.0f} draws ({:.0f} drawn) and {:.1f} copies per frame; "
                 "{} guest shaders, {} translated, {} pipelines; {} texture uploads ({} MB); "
                 "{} draws and {} resolves skipped in total; upload {} of {} MB (front buffer "
-                "{:08X}); per frame: GPU {:.1f} ms, recording {:.1f} ms, waiting for a slot "
-                "{:.1f} ms",
+                "{:08X}); per frame: GPU {:.1f} ms (draws {:.1f}, resolve copies {:.1f}, clears "
+                "{:.1f}, texture uploads {:.1f}, present {:.1f}; idle between frames {:.1f}), "
+                "recording {:.1f} ms, waiting for a slot {:.1f} ms",
                 swaps / seconds, swaps ? double(draws_ - report_draws_) / swaps : 0.0,
                 swaps ? double(draws_done_ - report_draws_done_) / swaps : 0.0,
                 swaps ? double(copies_ - report_copies_) / swaps : 0.0, shaders_.size(),
@@ -417,10 +510,18 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                 textures_.upload_bytes() >> 20, draws_skipped_, targets_.skipped(),
                 upload_.used() >> 20, upload_.capacity() >> 20, frontbuffer_ptr,
                 gpu_frames_ ? gpu_ns_ / gpu_frames_ * 1e-6 : 0.0,
+                gpu_frames_ ? gpu_kind_ns_[0] / gpu_frames_ * 1e-6 : 0.0,
+                gpu_frames_ ? gpu_kind_ns_[1] / gpu_frames_ * 1e-6 : 0.0,
+                gpu_frames_ ? gpu_kind_ns_[2] / gpu_frames_ * 1e-6 : 0.0,
+                gpu_frames_ ? gpu_kind_ns_[3] / gpu_frames_ * 1e-6 : 0.0,
+                gpu_frames_ ? gpu_kind_ns_[4] / gpu_frames_ * 1e-6 : 0.0,
+                gpu_frames_ ? gpu_gap_ns_ / gpu_frames_ * 1e-6 : 0.0,
                 swaps ? record_ns_ / swaps * 1e-6 : 0.0, swaps ? slot_wait_ns_ / swaps * 1e-6 : 0.0);
-    gpu_ns_ = record_ns_ = slot_wait_ns_ = 0.0;
+    gpu_ns_ = record_ns_ = slot_wait_ns_ = gpu_gap_ns_ = 0.0;
+    for (double& ns : gpu_kind_ns_) ns = 0.0;
     gpu_frames_ = 0;
     report_draws_done_ = draws_done_;
+    profile_next_frame_ = cmd_write_timestamp_ != nullptr;
     report_start_ = now;
     report_draws_ = draws_;
     report_copies_ = copies_;

@@ -20,6 +20,8 @@
 
 namespace rex::graphics::native {
 
+
+constexpr uint32_t kAlwaysCheckedBytes = 64 * 1024;
 namespace {
 
 struct HostFormat {
@@ -489,8 +491,9 @@ void NativeTextures::Prepare(VkCommandBuffer cb, const xenos::xe_gpu_texture_fet
     return;
   }
 
-  // The bytes it covers, hashed at most once a frame, and less often while they do not change (the
-  // hash was a tenth of the ring thread on the Switch). Videos change every frame and stay checked.
+  // The bytes it covers, hashed at most once a frame, and large textures less often while they do not
+  // change (the hash was a tenth of the ring thread on the Switch). Small ones stay checked every
+  // frame: the menus animate text colors through 256x1 palette textures, and a late update showed.
   if (texture->checked_frame != frame_ && frame_ >= texture->next_check_frame) {
     texture->checked_frame = frame_;
     const texture_util::TextureGuestLayout layout = texture_util::GetGuestTextureLayout(
@@ -512,7 +515,7 @@ void NativeTextures::Prepare(VkCommandBuffer cb, const xenos::xe_gpu_texture_fet
       } else {
         texture->checked_frame = UINT64_MAX;  // Upload memory full: try again in the next frame.
       }
-    } else {
+    } else if (base_size + mip_size > kAlwaysCheckedBytes) {
       texture->stable_checks = std::min(texture->stable_checks + 1, 4u);
       texture->next_check_frame = frame_ + (uint64_t(1) << texture->stable_checks);
     }

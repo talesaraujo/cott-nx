@@ -83,6 +83,9 @@ class NativeTargets {
 
   // Performs the resolve described by the current registers: copy, then clears, as Xenos does.
   void Resolve(VkCommandBuffer cb, const RegisterFile& regs, const memory::Memory& memory);
+  // GPU time accounting (the command processor's report): called with 1 before a resolve's copy and
+  // with 2 before its clears.
+  std::function<void(uint32_t)> gpu_mark;
 
   // The render targets a draw writes, as bound by RB_SURFACE_INFO, RB_COLOR_INFO / RB_COLOR1_INFO and
   // RB_DEPTH_INFO (same images the resolves read). Null when the format is not supported yet.

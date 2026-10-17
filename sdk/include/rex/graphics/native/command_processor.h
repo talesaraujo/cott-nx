@@ -55,8 +55,18 @@ class NativeCommandProcessor : public CommandProcessor {
     VkCommandPool pool = VK_NULL_HANDLE;
     VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
-    // Two GPU timestamps, at the start and the end of the frame's command buffer.
+    // GPU timestamps: the first at the start of the frame's command buffer, the last at its end, and
+    // one at each change of the kind of work in between (GpuMark).
     VkQueryPool timestamps = VK_NULL_HANDLE;
+    std::vector<uint8_t> mark_kinds;  // kind of the work after each timestamp
+    // Profile frames only: the draw after each timestamp (shaders and scissor size), for the GPU time
+    // per shader pair in the report.
+    struct DrawTag {
+      uint64_t vs = 0, ps = 0;
+      uint32_t width = 0, height = 0;
+    };
+    std::vector<DrawTag> mark_draws;
+    bool profiled = false;
     bool submitted = false;
     std::chrono::steady_clock::time_point submit_time;
   };
@@ -152,6 +162,18 @@ class NativeCommandProcessor : public CommandProcessor {
   PFN_vkGetQueryPoolResults get_query_pool_results_ = nullptr;
   double timestamp_period_ns_ = 0.0;
   uint64_t timestamp_mask_ = 0;
+  // Kinds of GPU work: draws, resolve copies, resolve clears, texture uploads, the present blit.
+  static constexpr uint32_t kGpuKinds = 5;
+  static constexpr uint32_t kMaxGpuMarks = 4096;
+  void GpuMark(uint32_t kind);
+  // A timestamp before a draw of a profile frame (one frame after each report).
+  void GpuMarkDraw(uint64_t vs, uint64_t ps, uint32_t width, uint32_t height);
+  bool profile_next_frame_ = false, profile_frame_ = false;
+  std::vector<uint64_t> gpu_ticks_;
+  uint32_t gpu_kind_ = 0;
+  double gpu_kind_ns_[kGpuKinds] = {};
+  double gpu_gap_ns_ = 0.0;
+  uint64_t last_gpu_end_ = 0;
   double gpu_ns_ = 0.0, slot_wait_ns_ = 0.0, record_ns_ = 0.0;
   uint64_t gpu_frames_ = 0;
   std::chrono::steady_clock::time_point record_start_;

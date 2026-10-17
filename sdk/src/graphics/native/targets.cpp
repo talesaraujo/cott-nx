@@ -339,6 +339,7 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
   };
 
   // 1. The copy.
+  if (gpu_mark) gpu_mark(1);
   const bool copy_depth = info.IsCopyingDepth();
   const draw_util::ResolveEdramInfo& src_edram =
       copy_depth ? info.depth_edram_info : info.color_edram_info;
@@ -454,48 +455,70 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
     }
   }
 
-  // 2. The clears, of the whole image for now (the rectangle covers the used part in every resolve seen).
+  if (gpu_mark) gpu_mark(2);
+  // 2. The clears, of the resolve rectangle only, as Xenos does. Clearing whole images (and every other
+  // image at the same EDRAM base) cost about 2 ms of GPU time per resolve on the Switch.
+  auto clear_rect = [&](NativeImage& image, const draw_util::ResolveEdramInfo& edram,
+                        uint32_t original_base, const VkClearValue& value, bool depth) {
+    uint32_t x, y;
+    locate(edram, original_base, x, y);
+    if (x >= image.width || y >= image.height) {
+      return;
+    }
+    const VkRect2D area = {{int32_t(x), int32_t(y)},
+                           {std::min(width, image.width - x), std::min(height, image.height - y)}};
+    Transition(cb, image,
+               depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                     : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo attachment = {};
+    attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    attachment.imageView = image.view;
+    attachment.imageLayout = image.layout;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.clearValue = value;
+    VkRenderingInfo rendering = {};
+    rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    rendering.renderArea = area;
+    rendering.layerCount = 1;
+    if (depth) {
+      rendering.pDepthAttachment = &attachment;
+      rendering.pStencilAttachment = &attachment;
+    } else {
+      rendering.colorAttachmentCount = 1;
+      rendering.pColorAttachments = &attachment;
+    }
+    dfn.vkCmdBeginRendering(cb, &rendering);
+    dfn.vkCmdEndRendering(cb);
+  };
   if (info.IsClearingColor()) {
     if (NativeImage* rt = GetRenderTarget(target_key(info.color_edram_info, info.color_original_base))) {
-      VkClearColorValue color = {};
+      VkClearValue value = {};
       if (REXCVAR_GET(native_debug_tint_clears)) {
         const float t = float(strip_x) / 1280.0f * 6.2831853f;
-        color.float32[0] = 0.5f + 0.5f * std::cos(t);
-        color.float32[1] = 0.5f + 0.5f * std::cos(t + 2.094f);
-        color.float32[2] = 0.5f + 0.5f * std::cos(t + 4.189f);
-        color.float32[3] = 1.0f;
+        value.color.float32[0] = 0.5f + 0.5f * std::cos(t);
+        value.color.float32[1] = 0.5f + 0.5f * std::cos(t + 2.094f);
+        value.color.float32[2] = 0.5f + 0.5f * std::cos(t + 4.189f);
+        value.color.float32[3] = 1.0f;
       } else {
         for (uint32_t i = 0; i < 4; ++i) {
-          color.float32[i] = float((info.rb_color_clear >> (i * 8)) & 0xFF) * (1.0f / 255.0f);
+          value.color.float32[i] = float((info.rb_color_clear >> (i * 8)) & 0xFF) * (1.0f / 255.0f);
         }
       }
-      // Every image of the same EDRAM area, whatever its MSAA mode: the game clears in 4X and draws
-      // in 2X (the same samples on the console; separate images here).
-      const VkImageSubresourceRange range = ui::vulkan::util::InitializeSubresourceRange();
-      for (NativeImage* alias : Aliases(rt, info.color_original_base, false)) {
-        Transition(cb, *alias, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        dfn.vkCmdClearColorImage(cb, alias->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &color, 1,
-                                 &range);
-      }
+      clear_rect(*rt, info.color_edram_info, info.color_original_base, value, false);
     }
   }
   if (info.IsClearingDepth()) {
     if (NativeImage* rt = GetRenderTarget(target_key(info.depth_edram_info, info.depth_original_base))) {
-      VkClearDepthStencilValue value = {};
+      VkClearValue value = {};
       const uint32_t depth24 = (info.rb_depth_clear >> 8) & 0xFFFFFF;
       // Host depth keeps the guest range halved, as the emulation and the translated shaders do.
-      value.depth = xenos::DepthRenderTargetFormat(info.depth_edram_info.format) ==
-                            xenos::DepthRenderTargetFormat::kD24FS8
-                        ? xenos::Float20e4To32(depth24) * 0.5f
-                        : xenos::UNorm24To32(depth24);
-      value.stencil = info.rb_depth_clear & 0xFF;
-      const VkImageSubresourceRange range = ui::vulkan::util::InitializeSubresourceRange(
-          VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
-      for (NativeImage* alias : Aliases(rt, info.depth_original_base, true)) {
-        Transition(cb, *alias, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        dfn.vkCmdClearDepthStencilImage(cb, alias->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &value,
-                                        1, &range);
-      }
+      value.depthStencil.depth = xenos::DepthRenderTargetFormat(info.depth_edram_info.format) ==
+                                         xenos::DepthRenderTargetFormat::kD24FS8
+                                     ? xenos::Float20e4To32(depth24) * 0.5f
+                                     : xenos::UNorm24To32(depth24);
+      value.depthStencil.stencil = info.rb_depth_clear & 0xFF;
+      clear_rect(*rt, info.depth_edram_info, info.depth_original_base, value, true);
     }
   }
 }

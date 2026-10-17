@@ -934,7 +934,8 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
     for (uint32_t slot : shader->texture_slots) {
       if (slot >= kTextureSlots) continue;
       const xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(slot);
-      textures_.Prepare(cb, fetch, targets_, [this]() { EndRendering(); }, bindings[slot]);
+      textures_.Prepare(cb, fetch, targets_, [this]() { EndRendering(); GpuMark(3); },
+                        bindings[slot]);
       if (trace_frame_) {
         REXGPU_INFO("[native trace]   {} slot {}: {:08X} format {} {}x{} swizzle {:03X} tiled {} "
                     "endian {} mips {} {}",
@@ -1191,6 +1192,8 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   }
   (void)any_texture;
 
+  GpuMark(0);
+
   // 8. The rendering pass: the same attachments keep it open across draws.
   if (rendering_ && (rendering_targets_[0] != targets[0] || rendering_targets_[1] != targets[1] ||
                      rendering_targets_[2] != targets[2])) {
@@ -1263,6 +1266,7 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   }
 
   // 9. The draw.
+  GpuMarkDraw(vs->hash, ps ? ps->hash : 0, scissor.extent.width, scissor.extent.height);
   dfn.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
   dfn.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_, 0, 4, sets, 0,
                               nullptr);
