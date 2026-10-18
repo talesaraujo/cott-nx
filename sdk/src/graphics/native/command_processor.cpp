@@ -77,7 +77,10 @@ bool NativeCommandProcessor::SetupContext() {
     return false;
   }
   targets_.gpu_mark = [this](uint32_t kind) { GpuMark(kind); };
-  targets_.before_replace = [this]() { EndRendering(); };
+  targets_.before_replace = [this]() {
+    EndRendering();
+    if (frame_command_buffer_) targets_.FlushPendingCopy(frame_command_buffer_);
+  };
   targets_.gpu_mark_resolve = [this](uint32_t width, uint32_t height, uint32_t flags) {
     GpuMarkResolve(width, height, flags);
   };
@@ -385,6 +388,7 @@ VkCommandBuffer NativeCommandProcessor::EnsureFrame() {
 void NativeCommandProcessor::SubmitFrame() {
   if (frame_command_buffer_) {
     EndRendering();
+    targets_.FlushPendingCopy(frame_command_buffer_);
     SubmitSlot();
     frame_command_buffer_ = VK_NULL_HANDLE;
   }
@@ -538,6 +542,10 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   RexSwitchPerfCount(0);
 #endif
   ++swaps_;
+  if (frame_command_buffer_) {
+    EndRendering();
+    targets_.FlushPendingCopy(frame_command_buffer_);  // before the front buffer is shown
+  }
   profile_frame_ = profile_next_frame_;
   profile_next_frame_ = false;
   trace_frame_ = trace_next_frame_;

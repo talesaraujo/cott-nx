@@ -24,6 +24,10 @@ REXCVAR_DEFINE_INT32(native_debug_skip_copies, 0, "GPU/Native",
                      "Debugging, to measure what the resolve copies cost: 1 skips the depth copies, 2 the "
                      "color copies narrower than the screen (the frame itself is one), 3 both. The image "
                      "is wrong while it is on.");
+REXCVAR_DEFINE_BOOL(native_coalesce_copies, true, "GPU/Native",
+                    "Make only the last of a run of identical color resolves a few draws apart (the "
+                    "level's distortion particles copy the whole screen after each one: ~6 ms of GPU per "
+                    "frame at 720p on the Switch). The particles of a run then do not refract each other.");
 REXCVAR_DEFINE_BOOL(native_debug_tint_clears, false, "GPU/Native",
                     "Clear color render targets with a color that depends on the resolved strip's "
                     "position instead of the game's clear color (checks the strip mapping)");
@@ -144,7 +148,8 @@ void NativeTargets::DestroyImage(NativeImage& image) {
 }
 
 void NativeTargets::Widen(NativeImage& image, uint32_t width) {
-  if (before_replace) before_replace();
+  if (before_replace) before_replace();  // also makes a pending copy
+  last_copy_valid_ = false;
   NativeImage wide;
   if (!CreateImage(wide, image.format, image.aspect, image.usage, width, image.height)) {
     return;
@@ -156,6 +161,21 @@ void NativeTargets::Widen(NativeImage& image, uint32_t width) {
   image.depth_copy_set = VK_NULL_HANDLE;
   retired_.push_back({image, 0});
   image = wide;
+}
+
+void NativeTargets::FlushPendingCopy(VkCommandBuffer cb) {
+  if (!pending_copy_) {
+    return;
+  }
+  pending_copy_ = false;
+  if (!last_copy_src_ || !last_copy_dest_ || !last_copy_src_->image || !last_copy_dest_->image) {
+    return;
+  }
+  Transition(cb, *last_copy_src_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+  Transition(cb, *last_copy_dest_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+  device_->functions().vkCmdCopyImage(cb, last_copy_src_->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                      last_copy_dest_->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                                      &last_copy_region_);
 }
 
 void NativeTargets::RetireTick() {
@@ -416,9 +436,10 @@ void NativeTargets::ReportCopies(uint64_t frames) {
   }
   const double f = double(frames);
   REXGPU_INFO("[native] copies per frame: {:.1f} color, {:.1f} depth, {:.2f} Mpixels; overwritten "
-              "before any draw read them: {:.1f} ({:.2f} Mpixels)",
+              "before any draw read them: {:.1f} ({:.2f} Mpixels); coalesced {:.1f}",
               color_copies_ / f, depth_copies_ / f, copied_pixels_ / f * 1e-6,
-              unread_overwritten_ / f, unread_pixels_ / f * 1e-6);
+              unread_overwritten_ / f, unread_pixels_ / f * 1e-6, coalesced_copies_ / f);
+  coalesced_copies_ = 0;
   color_copies_ = depth_copies_ = unread_overwritten_ = copied_pixels_ = unread_pixels_ = 0;
 }
 
@@ -596,6 +617,27 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
   ++resolves_;
   const ui::vulkan::VulkanDevice::Functions& dfn = device_->functions();
 
+  // A color copy identical to the last one, a few draws later: deferred (native_coalesce_copies).
+  const bool pure_color_copy = info.rb_copy_control.copy_command != xenos::CopyCommand::kNull &&
+                               info.copy_dest_extent_length && !info.IsCopyingDepth() &&
+                               !info.IsClearingColor() && !info.IsClearingDepth();
+  const std::array<uint32_t, 12> signature = {
+      regs[XE_GPU_REG_RB_COPY_CONTROL],     regs[XE_GPU_REG_RB_COPY_DEST_BASE],
+      regs[XE_GPU_REG_RB_COPY_DEST_PITCH],  regs[XE_GPU_REG_RB_COPY_DEST_INFO],
+      regs[XE_GPU_REG_RB_COLOR_INFO],       regs[XE_GPU_REG_RB_SURFACE_INFO],
+      regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET], regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL],
+      regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR], regs[XE_GPU_REG_RB_DEPTH_INFO],
+      full_width, height};
+  if (pure_color_copy && last_copy_valid_ && signature == last_copy_signature_ &&
+      trace_draw - last_copy_draw_ <= kCoalesceDraws && REXCVAR_GET(native_coalesce_copies)) {
+    pending_copy_ = true;
+    last_copy_draw_ = trace_draw;
+    ++coalesced_copies_;
+    return;
+  }
+  FlushPendingCopy(cb);
+  last_copy_valid_ = false;
+
   // Where the rectangle is inside a render target that starts at `original_base`.
   auto locate = [&](const draw_util::ResolveEdramInfo& edram, uint32_t original_base, uint32_t& x,
                     uint32_t& y) {
@@ -735,6 +777,14 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
           dfn.vkCmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dest->image,
                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
           last_color_destination_ = dest;
+          if (pure_color_copy) {
+            last_copy_valid_ = true;
+            last_copy_signature_ = signature;
+            last_copy_src_ = src;
+            last_copy_dest_ = dest;
+            last_copy_region_ = region;
+            last_copy_draw_ = trace_draw;
+          }
         } else if (EnsureStagingBuffer(VkDeviceSize(w) * h * 4)) {
           VkBufferImageCopy to_buffer = {};
           to_buffer.bufferRowLength = w;

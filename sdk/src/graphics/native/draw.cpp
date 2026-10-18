@@ -662,6 +662,12 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
       (regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET] & 0x7FFF) != 0) {
     return true;
   }
+  // A deferred copy is made before any draw past the run (native_coalesce_copies).
+  if (targets_.has_pending_copy() &&
+      uint32_t(draws_ - frame_first_draw_) - targets_.last_copy_draw() > NativeTargets::kCoalesceDraws) {
+    EndRendering();
+    targets_.FlushPendingCopy(EnsureFrame());
+  }
   const Strip strip = StripContext();
   {
     const uint32_t offset = regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET];

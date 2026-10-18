@@ -23,6 +23,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -102,6 +103,16 @@ class NativeTargets {
   std::function<void()> before_replace;
   // Once per frame: destroys the images replaced long enough ago.
   void RetireTick();
+  // Repeated color copies (native_coalesce_copies). The level's distortion particles each draw and then
+  // copy the whole screen again, so the next one refracts the previous: a copy identical to the last one
+  // (same registers, no clears) at most kCoalesceDraws draws later is deferred, and only the last of a
+  // run is made, before anything else that could depend on it: another resolve, a later draw, the end of
+  // the frame. The particles of a run see the screen as it was before the run.
+  void FlushPendingCopy(VkCommandBuffer cb);
+  bool has_pending_copy() const { return pending_copy_; }
+  uint32_t last_copy_draw() const { return last_copy_draw_; }
+  static constexpr uint32_t kCoalesceDraws = 2;
+  uint64_t coalesced_copies() const { return coalesced_copies_; }
   // GPU time accounting (the command processor's report): called with 1 before a resolve's copy and
   // with 2 before its clears.
   std::function<void(uint32_t)> gpu_mark;
@@ -200,6 +211,15 @@ class NativeTargets {
   VkSampler depth_copy_sampler_ = VK_NULL_HANDLE;
   VkDescriptorPool depth_copy_pool_ = VK_NULL_HANDLE;
   bool depth_copy_failed_ = false;
+
+  // The last color copy made (for native_coalesce_copies) and whether a copy like it is pending.
+  std::array<uint32_t, 12> last_copy_signature_{};
+  bool last_copy_valid_ = false, pending_copy_ = false;
+  NativeImage* last_copy_src_ = nullptr;
+  NativeImage* last_copy_dest_ = nullptr;
+  VkImageCopy last_copy_region_{};
+  uint32_t last_copy_draw_ = 0;
+  uint64_t coalesced_copies_ = 0;
 
   std::unordered_set<uint32_t> skip_reasons_logged_;
   uint64_t resolves_ = 0;
