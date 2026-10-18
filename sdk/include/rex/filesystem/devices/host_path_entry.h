@@ -49,6 +49,14 @@ class HostPathEntry : public Entry {
   std::unique_ptr<memory::MappedMemory> OpenMapped(memory::MappedMemory::Mode mode, size_t offset,
                                                    size_t length) override;
   void update() override;
+  /**
+   * COTT: the size after a write or a truncation through one of this entry's files. From then on the
+   * entry keeps its own size and update() no longer asks the host: on the Switch a stat of a file that
+   * is open for writing does not see those writes, so the game's saves got their size field as 0 and
+   * would not load.
+   */
+  void NoteWrite(size_t end);
+  void NoteLength(size_t length);
   bool SetAttributes(uint64_t attributes) override;
   bool SetCreateTimestamp(uint64_t timestamp) override;
   bool SetAccessTimestamp(uint64_t timestamp) override;
@@ -64,6 +72,7 @@ class HostPathEntry : public Entry {
 
   std::filesystem::path host_path_;
   bool children_complete_ = false;
+  bool size_from_writes_ = false;
 };
 
 }  // namespace rex::filesystem

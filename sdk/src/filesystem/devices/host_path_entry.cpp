@@ -10,6 +10,8 @@
  */
 
 #include <rex/filesystem/devices/host_path_entry.h>
+
+#include <algorithm>
 #include <rex/filesystem/devices/host_path_file.h>
 
 #include <rex/filesystem.h>
@@ -156,7 +158,20 @@ X_STATUS HostPathEntry::RenameEntryInternal(const std::vector<std::string_view>&
   return X_STATUS_SUCCESS;
 }
 
+void HostPathEntry::NoteWrite(size_t end) {
+  NoteLength(std::max(end, size_));
+}
+
+void HostPathEntry::NoteLength(size_t length) {
+  size_from_writes_ = true;
+  size_ = length;
+  allocation_size_ = rex::round_up(length, device()->bytes_per_sector());
+}
+
 void HostPathEntry::update() {
+  if (size_from_writes_) {
+    return;
+  }
   rex::filesystem::FileInfo file_info;
   if (!rex::filesystem::GetInfo(host_path_, &file_info)) {
     return;

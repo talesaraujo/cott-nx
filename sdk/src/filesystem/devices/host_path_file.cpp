@@ -851,6 +851,7 @@ X_STATUS HostPathFile::WriteSync(std::span<const uint8_t> buffer, size_t byte_of
   ventana_bytes_ = 0;
 
   if (file_handle_->Write(byte_offset, buffer.data(), buffer.size(), out_bytes_written)) {
+    static_cast<HostPathEntry*>(entry())->NoteWrite(byte_offset + *out_bytes_written);
     return X_STATUS_SUCCESS;
   } else {
     return X_STATUS_END_OF_FILE;
@@ -869,6 +870,7 @@ X_STATUS HostPathFile::SetLength(size_t length) {
   ventana_bytes_ = 0;
 
   if (file_handle_->SetLength(length)) {
+    static_cast<HostPathEntry*>(entry())->NoteLength(length);
     return X_STATUS_SUCCESS;
   } else {
     return X_STATUS_END_OF_FILE;
