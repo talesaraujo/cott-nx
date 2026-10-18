@@ -42,6 +42,8 @@ REXCVAR_DEFINE_BOOL(native_gpu_marks, true, "GPU/Native",
 REXCVAR_DEFINE_BOOL(native_untile, true, "GPU/Native",
                     "Draw the game's predicated tiling passes (the scene in 3 strips of 448 pixels) once, "
                     "as the whole screen: about 2/3 of the level's draws are replays of the other strips");
+REXCVAR_DEFINE_BOOL(native_log_indirect_buffers, false, "GPU/Native",
+                    "Debugging: logs every indirect buffer of the profiled frame (address, size, bins, window)");
 REXCVAR_DEFINE_BOOL(native_present_last_resolve, false, "GPU/Native",
                     "Show the destination of the latest color resolve instead of the front buffer "
                     "(debugging the render targets before draws work)");
@@ -472,6 +474,34 @@ bool NativeCommandProcessor::ForcePredicatedPass() {
          CurrentStrip() == Strip::kFirst;
 }
 
+bool NativeCommandProcessor::SkipIndirectBuffer(uint32_t ptr, uint32_t count) {
+  // The later strips replay the first strip's indirect buffers (the same addresses) with their own bins
+  // selected. Drawn once, their big ones (the scene: ~50k dwords per strip in the level) only cost the
+  // ring thread the time to read packets whose draws are skipped anyway. The small ones still run: they
+  // set each strip's window. Being the same buffers, the registers they leave are the same.
+  if (strip_width_ && first_bins_ && count >= kStripBufferSkipDwords &&
+      (bin_select_ & other_bins_) && !(bin_select_ & first_bins_)) {
+    ++strip_buffers_skipped_;
+    strip_dwords_skipped_ += count;
+    // Their draws taught the strip layout: kept as it was, or the next frame would draw the strips.
+    strip_width_seen_ = std::max(strip_width_seen_, strip_width_);
+    screen_width_seen_ = std::max(screen_width_seen_, screen_width_);
+    second_strip_x0_seen_ =
+        second_strip_x0_seen_ ? std::min(second_strip_x0_seen_, second_strip_x0_) : second_strip_x0_;
+    other_bins_seen_ |= bin_select_;
+    return true;
+  }
+  if (profile_frame_ && REXCVAR_GET(native_log_indirect_buffers)) {
+    const RegisterFile& regs = *register_file_;
+    REXGPU_INFO("[native ib] after draw {}: {:08X} {} dwords, bins select {:X} mask {:X}, window "
+                "offset {:08X} scissor {:08X}-{:08X}",
+                draws_ - frame_first_draw_, ptr, count, bin_select_, bin_mask_,
+                regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET], regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL],
+                regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR]);
+  }
+  return false;
+}
+
 bool NativeCommandProcessor::IssueCopy() {
   ++copies_;
   VkCommandBuffer cb = EnsureFrame();
@@ -682,7 +712,12 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                   strip_width_, screen_width_, first_bins_, other_bins_,
                   double(strip_draws_skipped_) / swaps, double(strip_resolves_skipped_) / swaps);
     }
-    strip_draws_skipped_ = strip_resolves_skipped_ = 0;
+    if (strip_buffers_skipped_) {
+      REXGPU_INFO("[native] untiled: later strips' indirect buffers skipped {:.1f} per frame ({:.0f} "
+                  "dwords)",
+                  double(strip_buffers_skipped_) / swaps, double(strip_dwords_skipped_) / swaps);
+    }
+    strip_draws_skipped_ = strip_resolves_skipped_ = strip_buffers_skipped_ = strip_dwords_skipped_ = 0;
     std::string windows;
     for (const auto& [key, count] : strip_windows_) {
       const auto& [offset_x, x0, x1, kind] = key;

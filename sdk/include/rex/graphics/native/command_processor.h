@@ -95,6 +95,7 @@ class NativeCommandProcessor : public CommandProcessor {
   // Also by the selected bins (anything drawn while a strip is being replayed).
   Strip StripContext();
   bool ForcePredicatedPass() override;
+  bool SkipIndirectBuffer(uint32_t ptr, uint32_t count) override;
   // From the previous frame: the later strips' widest window, where the second one starts, where the
   // first one ends, and the screen's width. Strips can differ: at 640x480 they are 0-224, 192-448 and
   // 416-640.
@@ -104,6 +105,8 @@ class NativeCommandProcessor : public CommandProcessor {
   uint64_t first_bins_ = 0, other_bins_ = 0;              // bin selections, previous frame
   uint64_t first_bins_seen_ = 0, other_bins_seen_ = 0;
   uint64_t strip_draws_skipped_ = 0, strip_resolves_skipped_ = 0;
+  uint64_t strip_buffers_skipped_ = 0, strip_dwords_skipped_ = 0;
+  static constexpr uint32_t kStripBufferSkipDwords = 256;
   // Draws per (window offset x, window scissor x0, x1, kind) in the report interval (diagnostics).
   std::map<std::tuple<int32_t, uint32_t, uint32_t, int>, uint32_t> strip_windows_;
 

@@ -191,6 +191,8 @@ class CommandProcessor {
   // renderer draws the first strip of a tiled pass as the whole screen). Only draws: the strips' own
   // setup (window offset and scissor) is predicated too, one packet per bin.
   virtual bool ForcePredicatedPass() { return false; }
+  // Called before an indirect buffer runs; true skips it.
+  virtual bool SkipIndirectBuffer(uint32_t ptr, uint32_t count) { return false; }
   void ExecuteIndirectBuffer(uint32_t ptr, uint32_t length);
   bool ExecutePacket(memory::RingBuffer* reader);
   bool ExecutePacketType0(memory::RingBuffer* reader, uint32_t packet);
