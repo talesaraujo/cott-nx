@@ -18,6 +18,12 @@
 #include <rex/ui/vulkan/device.h>
 #include <rex/ui/vulkan/util.h>
 
+#include "shaders/depth_copy_spirv.h"
+
+REXCVAR_DEFINE_INT32(native_debug_skip_copies, 0, "GPU/Native",
+                     "Debugging, to measure what the resolve copies cost: 1 skips the depth copies, 2 the "
+                     "color copies narrower than the screen (the frame itself is one), 3 both. The image "
+                     "is wrong while it is on.");
 REXCVAR_DEFINE_BOOL(native_debug_tint_clears, false, "GPU/Native",
                     "Clear color render targets with a color that depends on the resolved strip's "
                     "position instead of the game's clear color (checks the strip mapping)");
@@ -69,6 +75,18 @@ void NativeTargets::Shutdown() {
   staging_ = VK_NULL_HANDLE;
   staging_memory_ = VK_NULL_HANDLE;
   staging_size_ = 0;
+  if (depth_copy_pipeline_) dfn.vkDestroyPipeline(device_->device(), depth_copy_pipeline_, nullptr);
+  if (depth_copy_layout_) dfn.vkDestroyPipelineLayout(device_->device(), depth_copy_layout_, nullptr);
+  if (depth_copy_set_layout_) {
+    dfn.vkDestroyDescriptorSetLayout(device_->device(), depth_copy_set_layout_, nullptr);
+  }
+  if (depth_copy_pool_) dfn.vkDestroyDescriptorPool(device_->device(), depth_copy_pool_, nullptr);
+  if (depth_copy_sampler_) dfn.vkDestroySampler(device_->device(), depth_copy_sampler_, nullptr);
+  depth_copy_pipeline_ = VK_NULL_HANDLE;
+  depth_copy_layout_ = VK_NULL_HANDLE;
+  depth_copy_set_layout_ = VK_NULL_HANDLE;
+  depth_copy_pool_ = VK_NULL_HANDLE;
+  depth_copy_sampler_ = VK_NULL_HANDLE;
   device_ = nullptr;
 }
 
@@ -113,6 +131,7 @@ bool NativeTargets::CreateImage(NativeImage& image, VkFormat format, VkImageAspe
 
 void NativeTargets::DestroyImage(NativeImage& image) {
   const ui::vulkan::VulkanDevice::Functions& dfn = device_->functions();
+  if (image.depth_view) dfn.vkDestroyImageView(device_->device(), image.depth_view, nullptr);
   if (image.view) dfn.vkDestroyImageView(device_->device(), image.view, nullptr);
   if (image.image) dfn.vkDestroyImage(device_->device(), image.image, nullptr);
   if (image.memory) dfn.vkFreeMemory(device_->device(), image.memory, nullptr);
@@ -136,6 +155,205 @@ bool NativeTargets::EnsureStagingBuffer(VkDeviceSize size) {
     return false;
   }
   staging_size_ = size;
+  return true;
+}
+
+bool NativeTargets::EnsureDepthCopy() {
+  if (depth_copy_pipeline_) return true;
+  if (depth_copy_failed_) return false;
+  depth_copy_failed_ = true;  // Until everything below is made.
+  const ui::vulkan::VulkanDevice::Functions& dfn = device_->functions();
+  const VkDevice device = device_->device();
+
+  VkSamplerCreateInfo sampler_info = {};
+  sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+  sampler_info.magFilter = VK_FILTER_NEAREST;
+  sampler_info.minFilter = VK_FILTER_NEAREST;
+  sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+  sampler_info.addressModeU = sampler_info.addressModeV = sampler_info.addressModeW =
+      VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+  if (dfn.vkCreateSampler(device, &sampler_info, nullptr, &depth_copy_sampler_) != VK_SUCCESS) {
+    return false;
+  }
+  VkDescriptorSetLayoutBinding binding = {};
+  binding.binding = 0;
+  binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  binding.descriptorCount = 1;
+  binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+  binding.pImmutableSamplers = &depth_copy_sampler_;
+  VkDescriptorSetLayoutCreateInfo set_layout_info = {};
+  set_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  set_layout_info.bindingCount = 1;
+  set_layout_info.pBindings = &binding;
+  if (dfn.vkCreateDescriptorSetLayout(device, &set_layout_info, nullptr, &depth_copy_set_layout_) !=
+      VK_SUCCESS) {
+    return false;
+  }
+  // One set per depth render target, which live until shutdown (the pool goes with them).
+  constexpr uint32_t kMaxSets = 64;
+  VkDescriptorPoolSize pool_size = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxSets};
+  VkDescriptorPoolCreateInfo pool_info = {};
+  pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+  pool_info.maxSets = kMaxSets;
+  pool_info.poolSizeCount = 1;
+  pool_info.pPoolSizes = &pool_size;
+  if (dfn.vkCreateDescriptorPool(device, &pool_info, nullptr, &depth_copy_pool_) != VK_SUCCESS) {
+    return false;
+  }
+  VkPushConstantRange push_range = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 2 * sizeof(int32_t)};
+  VkPipelineLayoutCreateInfo layout_info = {};
+  layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  layout_info.setLayoutCount = 1;
+  layout_info.pSetLayouts = &depth_copy_set_layout_;
+  layout_info.pushConstantRangeCount = 1;
+  layout_info.pPushConstantRanges = &push_range;
+  if (dfn.vkCreatePipelineLayout(device, &layout_info, nullptr, &depth_copy_layout_) != VK_SUCCESS) {
+    return false;
+  }
+
+  VkShaderModule modules[2] = {};
+  const std::pair<const uint32_t*, size_t> code[2] = {
+      {shaders::kDepthCopyVs, sizeof(shaders::kDepthCopyVs)},
+      {shaders::kDepthCopyPs, sizeof(shaders::kDepthCopyPs)}};
+  for (uint32_t i = 0; i < 2; ++i) {
+    VkShaderModuleCreateInfo module_info = {};
+    module_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    module_info.codeSize = code[i].second;
+    module_info.pCode = code[i].first;
+    if (dfn.vkCreateShaderModule(device, &module_info, nullptr, &modules[i]) != VK_SUCCESS) {
+      if (modules[0]) dfn.vkDestroyShaderModule(device, modules[0], nullptr);
+      return false;
+    }
+  }
+  VkPipelineShaderStageCreateInfo stages[2] = {};
+  for (uint32_t i = 0; i < 2; ++i) {
+    stages[i].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[i].stage = i ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT;
+    stages[i].module = modules[i];
+    stages[i].pName = "main";
+  }
+  VkPipelineVertexInputStateCreateInfo vertex_input = {};
+  vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+  VkPipelineInputAssemblyStateCreateInfo input_assembly = {};
+  input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+  input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkPipelineViewportStateCreateInfo viewport_state = {};
+  viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+  viewport_state.viewportCount = 1;
+  viewport_state.scissorCount = 1;
+  VkPipelineRasterizationStateCreateInfo rasterization = {};
+  rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+  rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+  rasterization.cullMode = VK_CULL_MODE_NONE;
+  rasterization.lineWidth = 1.0f;
+  VkPipelineMultisampleStateCreateInfo multisample = {};
+  multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+  multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState blend_attachment = {};
+  blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT;
+  VkPipelineColorBlendStateCreateInfo blend = {};
+  blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+  blend.attachmentCount = 1;
+  blend.pAttachments = &blend_attachment;
+  const VkDynamicState dynamic_states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+  VkPipelineDynamicStateCreateInfo dynamic = {};
+  dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+  dynamic.dynamicStateCount = 2;
+  dynamic.pDynamicStates = dynamic_states;
+  const VkFormat color_format = VK_FORMAT_R32_SFLOAT;
+  VkPipelineRenderingCreateInfo rendering = {};
+  rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  rendering.colorAttachmentCount = 1;
+  rendering.pColorAttachmentFormats = &color_format;
+  VkGraphicsPipelineCreateInfo pipeline_info = {};
+  pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  pipeline_info.pNext = &rendering;
+  pipeline_info.stageCount = 2;
+  pipeline_info.pStages = stages;
+  pipeline_info.pVertexInputState = &vertex_input;
+  pipeline_info.pInputAssemblyState = &input_assembly;
+  pipeline_info.pViewportState = &viewport_state;
+  pipeline_info.pRasterizationState = &rasterization;
+  pipeline_info.pMultisampleState = &multisample;
+  pipeline_info.pColorBlendState = &blend;
+  pipeline_info.pDynamicState = &dynamic;
+  pipeline_info.layout = depth_copy_layout_;
+  const VkResult result = dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info,
+                                                        nullptr, &depth_copy_pipeline_);
+  for (VkShaderModule module : modules) dfn.vkDestroyShaderModule(device, module, nullptr);
+  if (result != VK_SUCCESS) {
+    depth_copy_pipeline_ = VK_NULL_HANDLE;
+    REXGPU_ERROR("[native] could not create the depth copy pipeline: depth resolves use a buffer");
+    return false;
+  }
+  depth_copy_failed_ = false;
+  return true;
+}
+
+bool NativeTargets::DepthCopy(VkCommandBuffer cb, NativeImage& src, NativeImage& dest,
+                              uint32_t src_x, uint32_t src_y, uint32_t dest_x, uint32_t dest_y,
+                              uint32_t width, uint32_t height) {
+  if (!EnsureDepthCopy()) return false;
+  const ui::vulkan::VulkanDevice::Functions& dfn = device_->functions();
+  const VkDevice device = device_->device();
+  if (!src.depth_copy_set) {
+    VkImageViewCreateInfo view_info = {};
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = src.image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = src.format;
+    view_info.subresourceRange = ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_DEPTH_BIT);
+    if (dfn.vkCreateImageView(device, &view_info, nullptr, &src.depth_view) != VK_SUCCESS) {
+      src.depth_view = VK_NULL_HANDLE;
+      return false;
+    }
+    VkDescriptorSetAllocateInfo allocate_info = {};
+    allocate_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocate_info.descriptorPool = depth_copy_pool_;
+    allocate_info.descriptorSetCount = 1;
+    allocate_info.pSetLayouts = &depth_copy_set_layout_;
+    if (dfn.vkAllocateDescriptorSets(device, &allocate_info, &src.depth_copy_set) != VK_SUCCESS) {
+      src.depth_copy_set = VK_NULL_HANDLE;
+      return false;
+    }
+    VkDescriptorImageInfo image_info = {};
+    image_info.imageView = src.depth_view;
+    image_info.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet write = {};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = src.depth_copy_set;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &image_info;
+    dfn.vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+  }
+  Transition(cb, src, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+  Transition(cb, dest, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+  VkRenderingAttachmentInfo attachment = {};
+  attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  attachment.imageView = dest.view;
+  attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+  attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  const VkRect2D area = {{int32_t(dest_x), int32_t(dest_y)}, {width, height}};
+  VkRenderingInfo rendering = {};
+  rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+  rendering.renderArea = area;
+  rendering.layerCount = 1;
+  rendering.colorAttachmentCount = 1;
+  rendering.pColorAttachments = &attachment;
+  dfn.vkCmdBeginRendering(cb, &rendering);
+  dfn.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, depth_copy_pipeline_);
+  dfn.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, depth_copy_layout_, 0, 1,
+                              &src.depth_copy_set, 0, nullptr);
+  const int32_t offset[2] = {int32_t(src_x) - int32_t(dest_x), int32_t(src_y) - int32_t(dest_y)};
+  dfn.vkCmdPushConstants(cb, depth_copy_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(offset),
+                         offset);
+  const VkViewport viewport = {float(dest_x), float(dest_y), float(width), float(height), 0.0f, 1.0f};
+  dfn.vkCmdSetViewport(cb, 0, 1, &viewport);
+  dfn.vkCmdSetScissor(cb, 0, 1, &area);
+  dfn.vkCmdDraw(cb, 3, 1, 0, 0);
+  dfn.vkCmdEndRendering(cb);
   return true;
 }
 
@@ -341,8 +559,18 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
   };
 
   // 1. The copy.
-  if (gpu_mark) gpu_mark(1);
   const bool copy_depth = info.IsCopyingDepth();
+  if (gpu_mark_resolve) {
+    const bool has_copy = info.rb_copy_control.copy_command != xenos::CopyCommand::kNull &&
+                          info.copy_dest_extent_length;
+    gpu_mark_resolve(width, height,
+                     (copy_depth ? 1u : 0u) | (has_copy ? 2u : 0u) | (info.IsClearingColor() ? 4u : 0u) |
+                         (info.IsClearingDepth() ? 8u : 0u) |
+                         (uint32_t(copy_depth ? info.depth_edram_info.msaa_samples
+                                              : info.color_edram_info.msaa_samples) << 8));
+  } else if (gpu_mark) {
+    gpu_mark(1);
+  }
   const draw_util::ResolveEdramInfo& src_edram =
       copy_depth ? info.depth_edram_info : info.color_edram_info;
   const uint32_t src_original = copy_depth ? info.depth_original_base : info.color_original_base;
@@ -380,7 +608,8 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
         auto image = std::make_unique<NativeImage>();
         if (CreateImage(*image, dest_vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
                         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                            VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                            VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                            (copy_depth ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0u),
                         dest_pitch.copy_dest_pitch, dest_pitch.copy_dest_height)) {
           image->guest_base = dest_base;
           image->guest_pitch = dest_pitch.copy_dest_pitch;
@@ -409,6 +638,12 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
           dest_y < dest->height) {
         const uint32_t w = std::min({width, src->width - src_x, dest->width - dest_x});
         const uint32_t h = std::min({height, src->height - src_y, dest->height - dest_y});
+        if ((REXCVAR_GET(native_debug_skip_copies) & (copy_depth ? 1 : 2)) && (copy_depth || w < 1280)) {
+          // Measuring only (native_debug_skip_copies).
+        } else {
+        if (copy_depth && DepthCopy(cb, *src, *dest, src_x, src_y, dest_x, dest_y, w, h)) {
+          // Done by the draw.
+        } else {
         Transition(cb, *src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         Transition(cb, *dest, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         if (!copy_depth) {
@@ -450,6 +685,8 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
           buffer_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
           dfn.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                    0, 0, nullptr, 1, &buffer_barrier, 0, nullptr);
+        }
+        }
         }
       } else if (dest) {
         Skip(5, "rectangle outside the render target or the destination");

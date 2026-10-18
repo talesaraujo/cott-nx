@@ -71,6 +71,10 @@ struct NativeImage {
   // a draw or resolve last used it with its own mode.
   uint32_t msaa = 0;
   uint64_t last_use = 0;
+  // Depth render targets only: a depth-aspect view and the descriptor set the depth copy samples it
+  // through (created on its first depth resolve).
+  VkImageView depth_view = VK_NULL_HANDLE;
+  VkDescriptorSet depth_copy_set = VK_NULL_HANDLE;
 };
 
 class NativeTargets {
@@ -86,6 +90,9 @@ class NativeTargets {
   // GPU time accounting (the command processor's report): called with 1 before a resolve's copy and
   // with 2 before its clears.
   std::function<void(uint32_t)> gpu_mark;
+  // Profiled frames: one timestamp per resolve, tagged with its rectangle (width, height) and flags
+  // (bit 0 depth copy, bit 1 has a copy, bit 2 clears color, bit 3 clears depth, bits 8+ MSAA samples).
+  std::function<void(uint32_t width, uint32_t height, uint32_t flags)> gpu_mark_resolve;
 
   // The render targets a draw writes, as bound by RB_SURFACE_INFO, RB_COLOR_INFO / RB_COLOR1_INFO and
   // RB_DEPTH_INFO (same images the resolves read). Null when the format is not supported yet.
@@ -138,6 +145,13 @@ class NativeTargets {
                    VkImageUsageFlags usage, uint32_t width, uint32_t height);
   void DestroyImage(NativeImage& image);
   bool EnsureStagingBuffer(VkDeviceSize size);
+  // Depth resolves through a draw: a fragment shader reads the depth (texelFetch) and writes it to the
+  // R32_SFLOAT destination. Through the staging buffer (image to buffer to image) each 448x720 depth
+  // resolve cost ~1.4 ms of GPU time on the Switch, ~16 ms per frame in the level. False when the
+  // pipeline could not be made (the buffer path is used then).
+  bool EnsureDepthCopy();
+  bool DepthCopy(VkCommandBuffer cb, NativeImage& src, NativeImage& dest, uint32_t src_x,
+                 uint32_t src_y, uint32_t dest_x, uint32_t dest_y, uint32_t width, uint32_t height);
   // Logs a reason the first time it is seen.
   void Skip(uint32_t reason, const char* text);
 
@@ -151,6 +165,13 @@ class NativeTargets {
   VkBuffer staging_ = VK_NULL_HANDLE;
   VkDeviceMemory staging_memory_ = VK_NULL_HANDLE;
   VkDeviceSize staging_size_ = 0;
+
+  VkDescriptorSetLayout depth_copy_set_layout_ = VK_NULL_HANDLE;
+  VkPipelineLayout depth_copy_layout_ = VK_NULL_HANDLE;
+  VkPipeline depth_copy_pipeline_ = VK_NULL_HANDLE;
+  VkSampler depth_copy_sampler_ = VK_NULL_HANDLE;
+  VkDescriptorPool depth_copy_pool_ = VK_NULL_HANDLE;
+  bool depth_copy_failed_ = false;
 
   std::unordered_set<uint32_t> skip_reasons_logged_;
   uint64_t resolves_ = 0;

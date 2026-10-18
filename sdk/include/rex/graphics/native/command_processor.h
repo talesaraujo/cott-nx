@@ -171,6 +171,7 @@ class NativeCommandProcessor : public CommandProcessor {
   void GpuMark(uint32_t kind);
   // A timestamp before a draw of a profile frame (one frame after each report).
   void GpuMarkDraw(uint64_t vs, uint64_t ps, uint32_t width, uint32_t height);
+  void GpuMarkResolve(uint32_t width, uint32_t height, uint32_t flags);
   bool profile_next_frame_ = false, profile_frame_ = false;
   std::vector<uint64_t> gpu_ticks_;
   uint32_t gpu_kind_ = 0;
@@ -178,6 +179,10 @@ class NativeCommandProcessor : public CommandProcessor {
   double gpu_gap_ns_ = 0.0;
   uint64_t last_gpu_end_ = 0;
   double gpu_ns_ = 0.0, slot_wait_ns_ = 0.0, record_ns_ = 0.0;
+  // Real nanoseconds per reported one. The Switch's GPU timestamps do not run at the rate the driver
+  // reports (timestampPeriod): every measured span came out 1/1.627 of the real one. Each report
+  // compares the GPU timeline (frames plus the gaps between them) with the CPU clock.
+  double timestamp_scale_ = 1.0;
   uint64_t gpu_frames_ = 0;
   std::chrono::steady_clock::time_point record_start_;
 };
