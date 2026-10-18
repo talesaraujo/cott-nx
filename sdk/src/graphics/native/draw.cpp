@@ -725,7 +725,7 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   NativeImage* targets[3] = {};
   targets_.min_width =
       strip == Strip::kFirst || strip == Strip::kFirstSurface ? screen_width_ : 0;
-  targets_.widen_from = strip_width_;
+  targets_.widen_from = first_strip_x1_ ? first_strip_x1_ : strip_width_;
   if (color_mask & 0xF) targets[0] = targets_.GetColorTarget(regs, 0);
   if (color_mask & 0xF0) targets[1] = targets_.GetColorTarget(regs, 1);
   if (uses_depth) targets[2] = targets_.GetDepthTarget(regs);
@@ -1291,7 +1291,7 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
           }
           const bool msaa_4x =
               regs.Get<reg::RB_SURFACE_INFO>().msaa_samples == xenos::MsaaSamples::k4X;
-          strip_edge = float(msaa_4x ? strip_width_ / 2 : strip_width_);
+          strip_edge = float(msaa_4x ? first_strip_x1_ / 2 : first_strip_x1_);
           screen_edge = float(msaa_4x ? screen_width_ / 2 : screen_width_);
         }
         for (uint32_t r = 0; r < rectangle_count; ++r) {

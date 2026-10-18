@@ -95,8 +95,12 @@ class NativeCommandProcessor : public CommandProcessor {
   // Also by the selected bins (anything drawn while a strip is being replayed).
   Strip StripContext();
   bool ForcePredicatedPass() override;
-  uint32_t strip_width_ = 0, screen_width_ = 0;            // from the previous frame
-  uint32_t strip_width_seen_ = 0, screen_width_seen_ = 0;  // this frame's
+  // From the previous frame: the later strips' widest window, where the second one starts, where the
+  // first one ends, and the screen's width. Strips can differ: at 640x480 they are 0-224, 192-448 and
+  // 416-640.
+  uint32_t strip_width_ = 0, second_strip_x0_ = 0, first_strip_x1_ = 0, screen_width_ = 0;
+  uint32_t strip_width_seen_ = 0, second_strip_x0_seen_ = 0, first_strip_x1_seen_ = 0,
+           screen_width_seen_ = 0;
   uint64_t first_bins_ = 0, other_bins_ = 0;              // bin selections, previous frame
   uint64_t first_bins_seen_ = 0, other_bins_seen_ = 0;
   uint64_t strip_draws_skipped_ = 0, strip_resolves_skipped_ = 0;

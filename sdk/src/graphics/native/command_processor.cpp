@@ -438,11 +438,13 @@ NativeCommandProcessor::Strip NativeCommandProcessor::CurrentStrip() {
     // A later strip: its window starts where the offset moves it to the surface's left edge.
     strip_width_seen_ = std::max(strip_width_seen_, x1 - x0);
     screen_width_seen_ = std::max(screen_width_seen_, x1);
+    second_strip_x0_seen_ = second_strip_x0_seen_ ? std::min(second_strip_x0_seen_, x0) : x0;
     other_bins_seen_ |= bin_select_;
     return strip_width_ ? Strip::kOther : Strip::kNone;
   }
-  if (strip_width_ && offset_x == 0 && x0 == 0 && x1 == strip_width_ && screen_width_ > x1) {
+  if (strip_width_ && offset_x == 0 && x0 == 0 && x1 > second_strip_x0_ && x1 < screen_width_) {
     first_bins_seen_ = bin_select_;
+    first_strip_x1_seen_ = x1;
     return Strip::kFirst;
   }
   return Strip::kNone;
@@ -493,7 +495,7 @@ bool NativeCommandProcessor::IssueCopy() {
     return true;  // The first strip's resolve copied and cleared the whole width.
   }
   targets_.min_width = strip == Strip::kFirst ? screen_width_ : 0;
-  targets_.widen_from = strip_width_;
+  targets_.widen_from = first_strip_x1_ ? first_strip_x1_ : strip_width_;
   targets_.Resolve(cb, *register_file_, *memory_, targets_.min_width);
   targets_.min_width = 0;
   GpuMark(0);
@@ -518,6 +520,9 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                 strip_width_seen_, screen_width_seen_);
   }
   strip_width_ = untile ? strip_width_seen_ : 0;
+  second_strip_x0_ = second_strip_x0_seen_;
+  first_strip_x1_ = first_strip_x1_seen_;
+  second_strip_x0_seen_ = first_strip_x1_seen_ = 0;
   screen_width_ = untile ? screen_width_seen_ : 0;
   strip_width_seen_ = screen_width_seen_ = 0;
   first_bins_ = untile ? first_bins_seen_ : 0;

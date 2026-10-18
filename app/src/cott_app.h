@@ -12,6 +12,7 @@
 
 REXCVAR_DECLARE(std::string, driver_env);
 REXCVAR_DECLARE(int32_t, cott_switch_gpu_mhz);
+REXCVAR_DECLARE(std::string, cott_internal_resolution);
 
 #include <algorithm>
 #include <cctype>
@@ -88,6 +89,12 @@ class CottApp : public rex::ReXApp {
   // (command line or cott.toml) are touched.
   void OnPostInitLogging() override {
     ApplyDriverEnv();
+    // The game asks the kernel for the video mode and draws at 1280x720 or, for anything smaller, at
+    // its 640x480 widescreen mode (it has no other: asked for 1024x576, it picks 640x480).
+    if (REXCVAR_GET(cott_internal_resolution) == "480p") {
+      SetIfNotRequested("video_mode_width", "640");
+      SetIfNotRequested("video_mode_height", "480");
+    }
     // Without a GPU plugin the game runs but every graphics call is discarded: black screen.
     SetIfNotRequested("gpu_plugin", "xenos");
     // Render targets through fragment shader interlock (RADV on the PC, NVK on the Tegra X1). With

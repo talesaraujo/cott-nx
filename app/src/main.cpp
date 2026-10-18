@@ -9,6 +9,13 @@ REXCVAR_DEFINE_STRING(driver_env, "", "Debug",
                       "NAME=value separated by ';', set before it starts. Example: NVK_SHADER_STATS=1")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_STRING(cott_internal_resolution, "720p", "Graphics",
+                      "Resolution the game draws at: 720p (1280x720, the Xbox 360's) or 480p (640x480, the "
+                      "game's own widescreen SD mode, stretched to the screen). On the Switch in handheld mode "
+                      "480p cuts the GPU time per frame from ~45 to ~18 ms (episode 2: 19-23 -> 26-30 FPS), "
+                      "but is much blurrier.")
+    .allowed({"720p", "480p"})
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(cott_switch_gpu_mhz, 460, "Graphics",
                      "GPU clock asked of the system in handheld mode, through its official performance "
                      "configurations (no overclock): 460 (460.8 MHz, the fastest one a game can ask for), "
