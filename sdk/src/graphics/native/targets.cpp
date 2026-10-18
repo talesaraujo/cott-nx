@@ -64,6 +64,10 @@ void NativeTargets::Shutdown() {
     DestroyImage(*image);
   }
   targets_.clear();
+  for (Retired& old : retired_) {
+    DestroyImage(old.image);
+  }
+  retired_.clear();
   for (auto& [base, image] : destinations_) {
     DestroyImage(*image);
   }
@@ -126,6 +130,7 @@ bool NativeTargets::CreateImage(NativeImage& image, VkFormat format, VkImageAspe
   image.width = width;
   image.height = height;
   image.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  image.usage = usage;
   return true;
 }
 
@@ -136,6 +141,34 @@ void NativeTargets::DestroyImage(NativeImage& image) {
   if (image.image) dfn.vkDestroyImage(device_->device(), image.image, nullptr);
   if (image.memory) dfn.vkFreeMemory(device_->device(), image.memory, nullptr);
   image = NativeImage{};
+}
+
+void NativeTargets::Widen(NativeImage& image, uint32_t width) {
+  if (before_replace) before_replace();
+  NativeImage wide;
+  if (!CreateImage(wide, image.format, image.aspect, image.usage, width, image.height)) {
+    return;
+  }
+  REXGPU_INFO("[native] render target widened from {} to {} pixels (untiled pass)", image.width, width);
+  wide.msaa = image.msaa;
+  wide.last_use = image.last_use;
+  // The depth copy's descriptor set pointed at the old view: dropped (its pool is freed at shutdown).
+  image.depth_copy_set = VK_NULL_HANDLE;
+  retired_.push_back({image, 0});
+  image = wide;
+}
+
+void NativeTargets::RetireTick() {
+  // Three frames in flight at most (kFrameSlots): after more swaps than that, the GPU is past them.
+  for (size_t i = 0; i < retired_.size();) {
+    if (++retired_[i].age > 8) {
+      DestroyImage(retired_[i].image);
+      retired_[i] = std::move(retired_.back());
+      retired_.pop_back();
+    } else {
+      ++i;
+    }
+  }
 }
 
 bool NativeTargets::EnsureStagingBuffer(VkDeviceSize size) {
@@ -414,6 +447,7 @@ NativeImage* NativeTargets::GetRenderTarget(const RenderTargetKey& requested) {
       }
     }
     if (best) {
+      if (min_width > best->width && best->width >= widen_from) Widen(*best, min_width);
       return best;
     }
     key.msaa = uint32_t(xenos::MsaaSamples::k2X);
@@ -421,6 +455,9 @@ NativeImage* NativeTargets::GetRenderTarget(const RenderTargetKey& requested) {
   auto it = targets_.find(key);
   if (it != targets_.end()) {
     it->second->last_use = ++use_counter_;
+    if (min_width > it->second->width && it->second->width >= widen_from) {
+      Widen(*it->second, min_width);
+    }
     return it->second.get();
   }
   const auto msaa = xenos::MsaaSamples(key.msaa);
@@ -450,7 +487,8 @@ NativeImage* NativeTargets::GetRenderTarget(const RenderTargetKey& requested) {
   if (!key.pitch_tiles || key.base_tiles >= kEdramTiles) {
     return nullptr;
   }
-  const uint32_t width = key.pitch_tiles * TileWidthPixels(is_64bpp, msaa);
+  uint32_t width = key.pitch_tiles * TileWidthPixels(is_64bpp, msaa);
+  if (width >= widen_from) width = std::max(width, min_width);
   const uint32_t rows = (kEdramTiles - key.base_tiles) / key.pitch_tiles;
   const uint32_t height = std::min(kMaxRenderTargetHeight, std::max(1u, rows) * TileHeightPixels(msaa));
   auto image = std::make_unique<NativeImage>();
@@ -541,14 +579,17 @@ NativeImage* NativeTargets::FindTexture(uint32_t base) {
 }
 
 void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
-                            const memory::Memory& memory) {
+                            const memory::Memory& memory, uint32_t full_width) {
   draw_util::ResolveInfo info;
   if (!draw_util::GetResolveInfo(regs, memory, 1, 1, false, false, info)) {
     Skip(1, "GetResolveInfo failed");
     return;
   }
-  const uint32_t width = info.coordinate_info.width_div_8 * 8;
+  uint32_t width = info.coordinate_info.width_div_8 * 8;
   const uint32_t height = info.height_div_8 * 8;
+  if (full_width > width && info.coordinate_info.edram_offset_x_div_8 == 0 && width) {
+    width = full_width;  // The strip's rectangle, for the whole screen drawn at once.
+  }
   if (!width || !height) {
     return;  // Clipped away (other strips' resolves during a strip pass): nothing to copy or clear.
   }

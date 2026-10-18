@@ -662,6 +662,16 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
       (regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET] & 0x7FFF) != 0) {
     return true;
   }
+  const Strip strip = StripContext();
+  {
+    const uint32_t offset = regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET];
+    ++strip_windows_[{int32_t(offset << 17) >> 17, regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL] & 0x3FFF,
+                      regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR] & 0x3FFF, int(strip)}];
+  }
+  if (strip == Strip::kOther) {
+    ++strip_draws_skipped_;
+    return true;  // Drawn with the first strip, as the whole screen (native_untile).
+  }
 
   // 1. Shaders.
   Shader* guest_vs = active_vertex_shader();
@@ -713,9 +723,13 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   const uint32_t depth_control = NormalizeDepthControl(mode, regs[XE_GPU_REG_RB_DEPTHCONTROL]);
   const bool uses_depth = (depth_control & 7) != 0;
   NativeImage* targets[3] = {};
+  targets_.min_width =
+      strip == Strip::kFirst || strip == Strip::kFirstSurface ? screen_width_ : 0;
+  targets_.widen_from = strip_width_;
   if (color_mask & 0xF) targets[0] = targets_.GetColorTarget(regs, 0);
   if (color_mask & 0xF0) targets[1] = targets_.GetColorTarget(regs, 1);
   if (uses_depth) targets[2] = targets_.GetDepthTarget(regs);
+  targets_.min_width = 0;
   if ((color_mask & 0xF) && !targets[0]) {
     SkipDraw(4, "color render target format not supported yet");
     return true;
@@ -749,6 +763,7 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   const uint32_t window_br = regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR];
   int32_t sx0 = int32_t(window_tl & 0x3FFF), sy0 = int32_t((window_tl >> 16) & 0x3FFF);
   int32_t sx1 = int32_t(window_br & 0x3FFF), sy1 = int32_t((window_br >> 16) & 0x3FFF);
+  if (strip == Strip::kFirst) sx1 = int32_t(screen_width_);
   if (!(window_tl & 0x80000000u)) {
     const uint32_t offset = regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET];
     sx0 += SignExtend15(offset);
@@ -1264,12 +1279,34 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
             is_float[b.offset_dwords + d] = true;
           }
         }
+        // The first strip's EDRAM clears (rectangles in surface pixels, no viewport transform) reach
+        // the strip's right edge: moved to the screen's, as the whole screen is drawn at once.
+        float strip_edge = 0.0f, screen_edge = 0.0f;
+        uint32_t position_dword = UINT32_MAX;
+        if (strip == Strip::kFirstSurface && !(regs[XE_GPU_REG_PA_CL_VTE_CNTL] & 0x3F)) {
+          for (const NativeVertexAttribute& b : vs->attributes) {
+            if (b.location == 0 && b.fetch_slot == a.fetch_slot && IsFloatVertexFormat(b.format)) {
+              position_dword = b.offset_dwords;
+            }
+          }
+          const bool msaa_4x =
+              regs.Get<reg::RB_SURFACE_INFO>().msaa_samples == xenos::MsaaSamples::k4X;
+          strip_edge = float(msaa_4x ? strip_width_ / 2 : strip_width_);
+          screen_edge = float(msaa_4x ? screen_width_ / 2 : screen_width_);
+        }
         for (uint32_t r = 0; r < rectangle_count; ++r) {
           uint8_t* v = out + size_t(r) * 4 * stride;
           for (uint32_t c = 0; c < 3; ++c) {
             CopySwapped(v + c * stride,
                         physical + ((address + rectangle_order[r * 3 + c] * stride) & 0x1FFFFFFF),
                         stride, fetch.endian);
+            if (position_dword < a.stride_dwords) {
+              float x;
+              std::memcpy(&x, v + c * stride + position_dword * 4, 4);
+              if (x == strip_edge) {
+                std::memcpy(v + c * stride + position_dword * 4, &screen_edge, 4);
+              }
+            }
           }
           for (uint32_t d = 0; d < a.stride_dwords; ++d) {
             float other, diagonal_a, diagonal_b;
@@ -1382,6 +1419,29 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
     rendering_extent_ = target_extent;
   }
 
+  if (profile_frame_ && rectangles && !(vte & 0x3F)) {
+    // Surface-space rectangles (no viewport transform): their corners and stencil (native_untile).
+    std::string corners;
+    for (const NativeVertexAttribute& a : vs->attributes) {
+      if (a.location != 0 || !IsFloatVertexFormat(a.format)) continue;
+      const xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(a.fetch_slot);
+      for (uint32_t v = 0; v < 3; ++v) {
+        uint32_t words[2] = {};
+        CopySwapped(reinterpret_cast<uint8_t*>(words),
+                    physical + (((fetch.address << 2) + (lo + v) * a.stride_dwords * 4 +
+                                 a.offset_dwords * 4) & 0x1FFFFFFF),
+                    8, fetch.endian);
+        corners += fmt::format(" ({:.0f},{:.0f})", F32(words[0]), F32(words[1]));
+      }
+      break;
+    }
+    REXGPU_INFO("[native rect] draw {} strip {} targets {}/{}/{} mask {:02X} depth {:08X} stencil "
+                "{:08X} window {:08X}-{:08X} offset {:08X} corners{}",
+                draws_ - frame_first_draw_, int(strip), targets[0] ? "C0" : "-", targets[1] ? "C1" : "-",
+                targets[2] ? "D" : "-", color_mask, key.depth_control,
+                regs[XE_GPU_REG_RB_STENCILREFMASK], regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL],
+                regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR], regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET], corners);
+  }
   if (trace_frame_) {
     float first[4] = {};
     for (const NativeVertexAttribute& a : vs->attributes) {

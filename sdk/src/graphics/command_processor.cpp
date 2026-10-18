@@ -805,7 +805,9 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
   // the packet. Only type 3 packets are affected.
   // We also skip predicated swaps, as they are never valid (probably?).
   if (packet & 1) {
-    bool any_pass = (bin_select_ & bin_mask_) != 0;
+    bool any_pass = (bin_select_ & bin_mask_) != 0 ||
+                    ((opcode == PM4_DRAW_INDX || opcode == PM4_DRAW_INDX_2) && bin_mask_ &&
+                     ForcePredicatedPass());
     if (!any_pass || opcode == PM4_XE_SWAP) {
       reader->AdvanceRead(count * sizeof(uint32_t));
       return true;

@@ -56,6 +56,7 @@ struct NativeImage {
   uint32_t width = 0;
   uint32_t height = 0;
   VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  VkImageUsageFlags usage = 0;
   // Destinations only: where the image lives in guest memory, and its tiled pitch and format.
   uint32_t guest_base = 0;
   uint32_t guest_pitch = 0;
@@ -88,7 +89,19 @@ class NativeTargets {
   void Shutdown();
 
   // Performs the resolve described by the current registers: copy, then clears, as Xenos does.
-  void Resolve(VkCommandBuffer cb, const RegisterFile& regs, const memory::Memory& memory);
+  // `full_width`: the first strip of a predicated tiling pass drawn as the whole screen (native_untile);
+  // a rectangle from the strip's left edge is widened to that many pixels.
+  void Resolve(VkCommandBuffer cb, const RegisterFile& regs, const memory::Memory& memory,
+               uint32_t full_width = 0);
+  // While not 0, the render targets looked up are at least this wide: an existing narrower image is
+  // replaced (its contents are lost; the old one is destroyed once the GPU is past it).
+  // Only images at least `widen_from` pixels wide are widened (the strip's; smaller targets drawn
+  // during the strip are something else).
+  uint32_t min_width = 0, widen_from = 0;
+  // Called before an image is replaced, so the rendering pass that uses it ends first.
+  std::function<void()> before_replace;
+  // Once per frame: destroys the images replaced long enough ago.
+  void RetireTick();
   // GPU time accounting (the command processor's report): called with 1 before a resolve's copy and
   // with 2 before its clears.
   std::function<void(uint32_t)> gpu_mark;
@@ -153,6 +166,12 @@ class NativeTargets {
   bool CreateImage(NativeImage& image, VkFormat format, VkImageAspectFlags aspect,
                    VkImageUsageFlags usage, uint32_t width, uint32_t height);
   void DestroyImage(NativeImage& image);
+  void Widen(NativeImage& image, uint32_t width);
+  struct Retired {
+    NativeImage image;
+    uint32_t age = 0;
+  };
+  std::vector<Retired> retired_;
   bool EnsureStagingBuffer(VkDeviceSize size);
   // Depth resolves through a draw: a fragment shader reads the depth (texelFetch) and writes it to the
   // R32_SFLOAT destination. Through the staging buffer (image to buffer to image) each 448x720 depth

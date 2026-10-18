@@ -39,6 +39,9 @@ REXCVAR_DEFINE_BOOL(native_gpu_marks, true, "GPU/Native",
                     "GPU timestamps at every change of work kind (draws, resolves, clears, uploads) in every "
                     "frame. Each one makes the GPU wait for the work before it. Off: only the frame's start "
                     "and end, and the profiled frame every report.");
+REXCVAR_DEFINE_BOOL(native_untile, true, "GPU/Native",
+                    "Draw the game's predicated tiling passes (the scene in 3 strips of 448 pixels) once, "
+                    "as the whole screen: about 2/3 of the level's draws are replays of the other strips");
 REXCVAR_DEFINE_BOOL(native_present_last_resolve, false, "GPU/Native",
                     "Show the destination of the latest color resolve instead of the front buffer "
                     "(debugging the render targets before draws work)");
@@ -72,6 +75,7 @@ bool NativeCommandProcessor::SetupContext() {
     return false;
   }
   targets_.gpu_mark = [this](uint32_t kind) { GpuMark(kind); };
+  targets_.before_replace = [this]() { EndRendering(); };
   targets_.gpu_mark_resolve = [this](uint32_t width, uint32_t height, uint32_t flags) {
     GpuMarkResolve(width, height, flags);
   };
@@ -423,6 +427,49 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   return Draw(prim_type, index_count, index_buffer_info);
 }
 
+NativeCommandProcessor::Strip NativeCommandProcessor::CurrentStrip() {
+  const RegisterFile& regs = *register_file_;
+  const uint32_t tl = regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL];
+  const uint32_t br = regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR];
+  const uint32_t x0 = tl & 0x3FFF, x1 = br & 0x3FFF;
+  const uint32_t offset = regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET];
+  int32_t offset_x = int32_t(offset << 17) >> 17;  // 15-bit signed
+  if (offset_x < 0 && x0 > 0 && uint32_t(-offset_x) == x0 && x1 > x0) {
+    // A later strip: its window starts where the offset moves it to the surface's left edge.
+    strip_width_seen_ = std::max(strip_width_seen_, x1 - x0);
+    screen_width_seen_ = std::max(screen_width_seen_, x1);
+    other_bins_seen_ |= bin_select_;
+    return strip_width_ ? Strip::kOther : Strip::kNone;
+  }
+  if (strip_width_ && offset_x == 0 && x0 == 0 && x1 == strip_width_ && screen_width_ > x1) {
+    first_bins_seen_ = bin_select_;
+    return Strip::kFirst;
+  }
+  return Strip::kNone;
+}
+
+NativeCommandProcessor::Strip NativeCommandProcessor::StripContext() {
+  const Strip strip = CurrentStrip();
+  if (strip != Strip::kNone || !strip_width_ || !first_bins_) {
+    return strip;
+  }
+  if (bin_select_ == first_bins_) {
+    return Strip::kFirstSurface;
+  }
+  if ((bin_select_ & other_bins_) && !(bin_select_ & first_bins_)) {
+    return Strip::kOther;
+  }
+  return Strip::kNone;
+}
+
+bool NativeCommandProcessor::ForcePredicatedPass() {
+  // The first strip drawn as the whole screen needs the draws of every bin, but not the resolves
+  // (draw packets in copy mode) of the other strips: their rectangles are those strips' own.
+  return strip_width_ &&
+         register_file_->Get<reg::RB_MODECONTROL>().edram_mode != xenos::EdramMode::kCopy &&
+         CurrentStrip() == Strip::kFirst;
+}
+
 bool NativeCommandProcessor::IssueCopy() {
   ++copies_;
   VkCommandBuffer cb = EnsureFrame();
@@ -440,7 +487,15 @@ bool NativeCommandProcessor::IssueCopy() {
   }
   targets_.trace_copies = profile_frame_;
   targets_.trace_draw = uint32_t(draws_ - frame_first_draw_);
-  targets_.Resolve(cb, *register_file_, *memory_);
+  const Strip strip = StripContext();
+  if (strip == Strip::kOther) {
+    ++strip_resolves_skipped_;
+    return true;  // The first strip's resolve copied and cleared the whole width.
+  }
+  targets_.min_width = strip == Strip::kFirst ? screen_width_ : 0;
+  targets_.widen_from = strip_width_;
+  targets_.Resolve(cb, *register_file_, *memory_, targets_.min_width);
+  targets_.min_width = 0;
   GpuMark(0);
   return true;
 }
@@ -456,6 +511,19 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   trace_frame_ = trace_next_frame_;
   trace_next_frame_ = false;
   frame_first_draw_ = draws_;
+  // The strip layout seen in this frame is used in the next one; none seen, nothing is untiled.
+  const bool untile = REXCVAR_GET(native_untile);
+  if ((strip_width_seen_ != strip_width_ || screen_width_seen_ != screen_width_) && untile) {
+    REXGPU_INFO("[native] predicated tiling: strips of {} pixels over {} (0: none), drawn once",
+                strip_width_seen_, screen_width_seen_);
+  }
+  strip_width_ = untile ? strip_width_seen_ : 0;
+  screen_width_ = untile ? screen_width_seen_ : 0;
+  strip_width_seen_ = screen_width_seen_ = 0;
+  first_bins_ = untile ? first_bins_seen_ : 0;
+  other_bins_ = untile ? other_bins_seen_ : 0;
+  first_bins_seen_ = other_bins_seen_ = 0;
+  targets_.RetireTick();
   trace_draw_index_ = 0;
 
   // The image the game shows is the resolve destination at the front buffer address. The presenter
@@ -603,6 +671,21 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     report_draws_ = draws_;
     report_copies_ = copies_;
     targets_.ReportCopies(swaps);
+    if (swaps && (strip_draws_skipped_ || strip_width_)) {
+      REXGPU_INFO("[native] untiled: strips of {} over {} pixels (bins {:X}, later {:X}); later "
+                  "strips' draws skipped {:.0f} and resolves {:.1f} per frame",
+                  strip_width_, screen_width_, first_bins_, other_bins_,
+                  double(strip_draws_skipped_) / swaps, double(strip_resolves_skipped_) / swaps);
+    }
+    strip_draws_skipped_ = strip_resolves_skipped_ = 0;
+    std::string windows;
+    for (const auto& [key, count] : strip_windows_) {
+      const auto& [offset_x, x0, x1, kind] = key;
+      windows += fmt::format(" | off {} win {}-{} kind {}: {:.0f}", offset_x, x0, x1, kind,
+                             swaps ? double(count) / swaps : 0.0);
+    }
+    REXGPU_INFO("[native] draws per frame by window{}", windows);
+    strip_windows_.clear();
     report_swaps_ = swaps_;
   }
 }

@@ -7,6 +7,8 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <map>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -79,6 +81,27 @@ class NativeCommandProcessor : public CommandProcessor {
   VkCommandBuffer frame_command_buffer_ = VK_NULL_HANDLE;
   VkCommandBuffer EnsureFrame();
   void SubmitFrame();
+
+  // Predicated tiling drawn once (native_untile). The game draws its scene in vertical strips (the
+  // window offset moves each to the start of the same EDRAM surface) and replays every draw that
+  // touches a strip. The renderer has no EDRAM limit: the first strip is drawn as the whole screen
+  // into render targets widened to it, its resolves copy the whole width, and the other strips' draws
+  // and resolves are skipped. The strip layout is learned from the previous frame.
+  // kFirstSurface: drawn while the first strip's bins are selected but without the strip's window: the
+  // EDRAM clears D3D draws as rectangles in surface coordinates, which cover the whole strip.
+  enum class Strip { kNone, kFirst, kOther, kFirstSurface };
+  // By the window registers only (draws and resolves of the strips).
+  Strip CurrentStrip();
+  // Also by the selected bins (anything drawn while a strip is being replayed).
+  Strip StripContext();
+  bool ForcePredicatedPass() override;
+  uint32_t strip_width_ = 0, screen_width_ = 0;            // from the previous frame
+  uint32_t strip_width_seen_ = 0, screen_width_seen_ = 0;  // this frame's
+  uint64_t first_bins_ = 0, other_bins_ = 0;              // bin selections, previous frame
+  uint64_t first_bins_seen_ = 0, other_bins_seen_ = 0;
+  uint64_t strip_draws_skipped_ = 0, strip_resolves_skipped_ = 0;
+  // Draws per (window offset x, window scissor x0, x1, kind) in the report interval (diagnostics).
+  std::map<std::tuple<int32_t, uint32_t, uint32_t, int>, uint32_t> strip_windows_;
 
   NativeTargets targets_;
   NativeShaderLibrary shader_library_;
