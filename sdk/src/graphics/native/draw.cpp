@@ -46,6 +46,9 @@ REXCVAR_DEFINE_STRING(native_shader_path, "", "GPU/Native",
 REXCVAR_DEFINE_STRING(native_shader_capture_path, "", "GPU/Native",
                       "Folder where the microcode of shaders missing from native_shader_path is saved "
                       "(vs_/ps_<hash>.ucode, the translator's input)");
+REXCVAR_DEFINE_BOOL(native_debug_first_strip_only, false, "GPU/Native",
+                    "Measuring only: skips the draws of every predicated tiling strip but the first "
+                    "(window offset x other than 0), so the right of the screen is wrong");
 REXCVAR_DEFINE_INT32(native_upload_mb, 48, "GPU/Native",
                      "Upload memory per frame in flight (constants, vertices, textures), in MB")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -653,6 +656,10 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
     return true;
   }
   if (!index_count) {
+    return true;
+  }
+  if (REXCVAR_GET(native_debug_first_strip_only) &&
+      (regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET] & 0x7FFF) != 0) {
     return true;
   }
 

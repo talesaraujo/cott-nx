@@ -56,6 +56,25 @@ for old, new in (('println("#define {}_Texture{}DescriptorIndex vk::RawBufferLoa
                   '                constantName, constantInfo->registerIndex.get());')):
     assert old in s, 'shader_recompiler.cpp changed upstream'
     s = s.replace(old, new, 1)
+# loop_end with a predicated break leaves the loop when p0 equals its condition (Xenia's interpreter and
+# DXBC translator). XenosRecomp ignored it, so every pixel ran all iterations: the level's motion blur
+# (ps_C5AB76F04A3EE0C2) samples along the velocity until p0 says the step left the blur length.
+for old, new in (('            case ControlFlowOpcode::LoopEnd:\n                if (simpleControlFlow)\n                {\n'
+                  '                    --indentation;\n                    indent();\n                    out += "}\\n";\n',
+                  '            case ControlFlowOpcode::LoopEnd:\n                if (simpleControlFlow)\n                {\n'
+                  '                    if (cfInstr.loopEnd.isPredicatedBreak)\n'
+                  '                    {\n'
+                  '                        indent();\n'
+                  '                        println("if ({}p0) break;", cfInstr.loopEnd.condition ? "" : "!");\n'
+                  '                    }\n'
+                  '                    --indentation;\n                    indent();\n                    out += "}\\n";\n'),
+                 ('                    println("\\t\\t\\tif (aL < g_LoopCount({}))", uint32_t(cfInstr.loopEnd.loopId));\n',
+                  '                    if (cfInstr.loopEnd.isPredicatedBreak)\n'
+                  '                        println("\\t\\t\\tif (aL < g_LoopCount({}) && {}p0)", uint32_t(cfInstr.loopEnd.loopId), cfInstr.loopEnd.condition ? "!" : "");\n'
+                  '                    else\n'
+                  '                        println("\\t\\t\\tif (aL < g_LoopCount({}))", uint32_t(cfInstr.loopEnd.loopId));\n')):
+    assert old in s, 'shader_recompiler.cpp changed upstream: ' + old[:40]
+    s = s.replace(old, new, 1)
 open(recompiler, 'w').write(s)
 # Linearize every shader whose jumps all go forward, not only the one MojoRecomp lists: XenosRecomp
 # emits shaders with jumps as a while (true) { switch (pc) } state machine that the GPU compiler cannot

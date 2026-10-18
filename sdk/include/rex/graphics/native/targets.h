@@ -75,6 +75,8 @@ struct NativeImage {
   // through (created on its first depth resolve).
   VkImageView depth_view = VK_NULL_HANDLE;
   VkDescriptorSet depth_copy_set = VK_NULL_HANDLE;
+  // Destinations only: the rectangles copied in since a draw last sampled it (the copy statistics).
+  std::vector<VkRect2D> unread;
 };
 
 class NativeTargets {
@@ -114,6 +116,13 @@ class NativeTargets {
   // opens a command buffer, `submit_and_wait` runs it to completion (the GPU must be idle before).
   void DumpImages(const std::string& dir, const std::function<VkCommandBuffer()>& begin,
                   const std::function<void()>& submit_and_wait);
+
+  // Copy statistics for the command processor's report: copies per frame and those overwritten by a
+  // later copy before any draw read them. Logs and resets.
+  void ReportCopies(uint64_t frames);
+  // Profiled frames: one log line per copy, with the draw count before it.
+  bool trace_copies = false;
+  uint32_t trace_draw = 0;
 
   uint64_t resolves() const { return resolves_; }
   uint64_t skipped() const { return skipped_; }
@@ -175,6 +184,8 @@ class NativeTargets {
 
   std::unordered_set<uint32_t> skip_reasons_logged_;
   uint64_t resolves_ = 0;
+  uint64_t color_copies_ = 0, depth_copies_ = 0, unread_overwritten_ = 0, copied_pixels_ = 0;
+  uint64_t unread_pixels_ = 0;
   uint64_t skipped_ = 0;
   uint64_t use_counter_ = 0;
 };

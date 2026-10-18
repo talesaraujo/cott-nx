@@ -442,6 +442,7 @@ void NativeTextures::Prepare(VkCommandBuffer cb, const xenos::xe_gpu_texture_fet
 
   // Render-to-texture: the destination of a resolve at this address.
   if (NativeImage* resolved = targets.FindTexture(fetch.base_address << 12)) {
+    resolved->unread.clear();
     if (resolved->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
       before_commands();
       targets.Transition(cb, *resolved, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);

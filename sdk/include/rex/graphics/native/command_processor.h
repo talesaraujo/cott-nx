@@ -157,6 +157,7 @@ class NativeCommandProcessor : public CommandProcessor {
   // Counters for the periodic report, written only by the command processor thread.
   uint64_t draws_ = 0, copies_ = 0, swaps_ = 0;
   uint64_t report_draws_ = 0, report_copies_ = 0, report_swaps_ = 0;
+  uint64_t frame_first_draw_ = 0;  // draws_ at the frame's start (the copy trace)
   std::chrono::steady_clock::time_point report_start_;
   // Where a frame's time goes (the report): GPU time between the frame's two timestamps, the ring
   // thread's waits for a free slot, its time recording a frame (first command to submit), and the

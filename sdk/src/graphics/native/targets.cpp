@@ -377,6 +377,18 @@ void NativeTargets::Transition(VkCommandBuffer cb, NativeImage& image, VkImageLa
   image.layout = layout;
 }
 
+void NativeTargets::ReportCopies(uint64_t frames) {
+  if (!frames) {
+    return;
+  }
+  const double f = double(frames);
+  REXGPU_INFO("[native] copies per frame: {:.1f} color, {:.1f} depth, {:.2f} Mpixels; overwritten "
+              "before any draw read them: {:.1f} ({:.2f} Mpixels)",
+              color_copies_ / f, depth_copies_ / f, copied_pixels_ / f * 1e-6,
+              unread_overwritten_ / f, unread_pixels_ / f * 1e-6);
+  color_copies_ = depth_copies_ = unread_overwritten_ = copied_pixels_ = unread_pixels_ = 0;
+}
+
 void NativeTargets::Skip(uint32_t reason, const char* text) {
   ++skipped_;
   if (skip_reasons_logged_.insert(reason).second) {
@@ -638,6 +650,32 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
           dest_y < dest->height) {
         const uint32_t w = std::min({width, src->width - src_x, dest->width - dest_x});
         const uint32_t h = std::min({height, src->height - src_y, dest->height - dest_y});
+        ++(copy_depth ? depth_copies_ : color_copies_);
+        copied_pixels_ += uint64_t(w) * h;
+        uint32_t overwritten = 0;
+        auto& unread = dest->unread;
+        for (size_t i = 0; i < unread.size();) {
+          const VkRect2D& r = unread[i];
+          if (uint32_t(r.offset.x) >= dest_x && uint32_t(r.offset.y) >= dest_y &&
+              r.offset.x + r.extent.width <= dest_x + w && r.offset.y + r.extent.height <= dest_y + h) {
+            unread_pixels_ += uint64_t(r.extent.width) * r.extent.height;
+            ++overwritten;
+            unread[i] = unread.back();
+            unread.pop_back();
+          } else {
+            ++i;
+          }
+        }
+        unread_overwritten_ += overwritten;
+        if (unread.size() < 64) {
+          unread.push_back({{int32_t(dest_x), int32_t(dest_y)}, {w, h}});
+        }
+        if (trace_copies) {
+          REXGPU_INFO("[native copy] after draw {}: {} EDRAM {} ({},{}) -> {:08X} ({},{}) {}x{}, "
+                      "covers {} unread",
+                      trace_draw, copy_depth ? "depth" : "color", src_original, src_x, src_y, dest_base,
+                      dest_x, dest_y, w, h, overwritten);
+        }
         if ((REXCVAR_GET(native_debug_skip_copies) & (copy_depth ? 1 : 2)) && (copy_depth || w < 1280)) {
           // Measuring only (native_debug_skip_copies).
         } else {

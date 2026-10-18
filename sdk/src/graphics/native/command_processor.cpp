@@ -238,7 +238,7 @@ VkCommandBuffer NativeCommandProcessor::BeginSlot() {
           uint32_t resolve_count = 0;
           for (uint32_t i = 0; i + 1 < marks && i < slot.mark_draws.size(); ++i) {
             const FrameSlot::DrawTag& tag = slot.mark_draws[i];
-            if (!(tag.ps & kResolveTag)) continue;
+            if (tag.vs || !(tag.ps & kResolveTag)) continue;  // shader hashes can have bit 63 too
             Sum& sum = resolves[{uint32_t(tag.ps), tag.width, tag.height}];
             const double ns = ns_between(ticks[i], ticks[i + 1]);
             sum.ns += ns;
@@ -438,6 +438,8 @@ bool NativeCommandProcessor::IssueCopy() {
                 regs[XE_GPU_REG_RB_COPY_DEST_INFO], regs[XE_GPU_REG_RB_COPY_DEST_PITCH],
                 regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL], regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR]);
   }
+  targets_.trace_copies = profile_frame_;
+  targets_.trace_draw = uint32_t(draws_ - frame_first_draw_);
   targets_.Resolve(cb, *register_file_, *memory_);
   GpuMark(0);
   return true;
@@ -453,6 +455,7 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   profile_next_frame_ = false;
   trace_frame_ = trace_next_frame_;
   trace_next_frame_ = false;
+  frame_first_draw_ = draws_;
   trace_draw_index_ = 0;
 
   // The image the game shows is the resolve destination at the front buffer address. The presenter
@@ -599,6 +602,7 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     report_start_ = now;
     report_draws_ = draws_;
     report_copies_ = copies_;
+    targets_.ReportCopies(swaps);
     report_swaps_ = swaps_;
   }
 }
