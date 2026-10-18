@@ -34,12 +34,14 @@ git -C "$X" apply "$REFS/MojoRecomp/patches/xenosrecomp-mojorecomp-runtime.patch
 # constant banks). COTT_UBO_CONSTANTS selects that cbuffer path for SPIR-V too: set 4, binding 0 the vertex
 # constants, 1 the pixel constants, 2 the shared constants (same layout as the BDA blocks). The renderer
 # binds both, so libraries built either way work.
-# COTT_UBO=1 builds that variant. It is off by default: on the Switch's NVK it made the menu's 2D shader
-# about 3x slower than the buffer-address path; the cause is still to be found.
+# It is the default (COTT_UBO=0 builds the buffer-address variant): with the linearized shaders it cut
+# the level's draws on the Switch from 57.7 to 40.7 ms per frame. Its first test, before linearization,
+# was 3x slower: cbuffer loads can be reordered, so the compilers hoisted them out of the
+# while(switch(pc)) loop and the live registers doubled.
 # Either way, texture and sampler indices are constants in the shader (the renderer's table is the
 # identity, slot N is index N): one memory load less before every texture fetch.
 python3 - "$X/XenosRecomp/shader_common.h" "$X/XenosRecomp/shader_recompiler.cpp" \
-    "$M/gpu/shader_translator.cpp" "$OUT/gen/shader_translator.cpp" "${COTT_UBO:-0}" <<'PY'
+    "$M/gpu/shader_translator.cpp" "$OUT/gen/shader_translator.cpp" "${COTT_UBO:-1}" <<'PY'
 import sys
 common, recompiler, translator_in, translator_out, ubo = sys.argv[1:6]
 ubo = ubo == '1'

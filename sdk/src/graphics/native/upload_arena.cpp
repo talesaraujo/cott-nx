@@ -34,7 +34,7 @@ bool UploadArena::Initialize(ui::vulkan::VulkanDevice* device, VkDeviceSize byte
     buffer_info.size = bytes_per_slot;
     buffer_info.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                         VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
     buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (dfn.vkCreateBuffer(device->device(), &buffer_info, nullptr, &slot.buffer) != VK_SUCCESS) {
       REXGPU_ERROR("[native] could not create the upload buffer");
