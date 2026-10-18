@@ -11,6 +11,7 @@
 #include <rex/rex_app.h>
 
 REXCVAR_DECLARE(std::string, driver_env);
+REXCVAR_DECLARE(int32_t, cott_switch_gpu_mhz);
 
 #include <algorithm>
 #include <cctype>
@@ -24,6 +25,9 @@ REXCVAR_DECLARE(std::string, driver_env);
 #include <spdlog/sinks/stdout_sinks.h>
 #include <netinet/in.h>  // struct in_addr, for __nxlink_host
 #include <switch.h>
+
+extern "C" void RexSwitchApmPedirGpuMhz(int mhz);
+extern "C" void RexSwitchApmAplicar(void);
 #endif
 
 class CottApp : public rex::ReXApp {
@@ -106,6 +110,11 @@ class CottApp : public rex::ReXApp {
 #else
     // Face buttons by position, as on the Xbox pad the game was made for: the bottom one is A.
     SetIfNotRequested("input_xbox_layout", "true");
+    // The GPU is the limit in handheld mode (307.2 MHz). The system's performance configuration
+    // 0x92220008 gives 460.8 MHz with the same memory clock, and any game may ask for it (nfsmw-nx
+    // does; sdk/src/ui/switch_apm.cpp). It is undone when the console is docked or the game ends.
+    RexSwitchApmPedirGpuMhz(REXCVAR_GET(cott_switch_gpu_mhz));
+    RexSwitchApmAplicar();
     // Started by nxlink: the log also goes to the PC's terminal, live (see StartNxlinkStdout).
     if (nxlink_stdout_) {
       rex::AddSink(std::make_shared<spdlog::sinks::stdout_sink_mt>());
