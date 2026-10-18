@@ -104,6 +104,8 @@ class CottApp : public rex::ReXApp {
     // Keyboard and mouse as a controller on PC. Not on the Switch: it would shadow the libnx pads.
     SetIfNotRequested("mnk_mode", "true");
 #else
+    // Face buttons by position, as on the Xbox pad the game was made for: the bottom one is A.
+    SetIfNotRequested("input_xbox_layout", "true");
     // Started by nxlink: the log also goes to the PC's terminal, live (see StartNxlinkStdout).
     if (nxlink_stdout_) {
       rex::AddSink(std::make_shared<spdlog::sinks::stdout_sink_mt>());
