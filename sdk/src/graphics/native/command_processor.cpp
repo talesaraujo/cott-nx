@@ -59,7 +59,10 @@ constexpr auto kReportInterval = std::chrono::seconds(10);
 
 NativeCommandProcessor::NativeCommandProcessor(GraphicsSystem* graphics_system,
                                                system::KernelState* kernel_state)
-    : CommandProcessor(graphics_system, kernel_state) {}
+    : CommandProcessor(graphics_system, kernel_state) {
+  // No WriteRegister override: the registers from kFirstPlainRegister up are read at draw time.
+  plain_register_writes_ = true;
+}
 
 NativeCommandProcessor::~NativeCommandProcessor() = default;
 

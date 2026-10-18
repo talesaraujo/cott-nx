@@ -507,7 +507,7 @@ void CommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_t* bas
                                              uint32_t num_registers) {
   for (uint32_t i = 0; i < num_registers; ++i) {
     uint32_t data = memory::load_and_swap<uint32_t>(base + i);
-    WriteRegister(start_index + i, data);
+    StoreRegister(start_index + i, data);
   }
 }
 
@@ -765,7 +765,7 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
   for (uint32_t m = 0; m < count; m++) {
     uint32_t reg_data = reader->ReadAndSwap<uint32_t>();
     uint32_t target_index = write_one_reg ? base_index : base_index + m;
-    WriteRegister(target_index, reg_data);
+    StoreRegister(target_index, reg_data);
   }
 
   return true;

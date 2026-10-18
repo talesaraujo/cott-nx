@@ -130,6 +130,22 @@ class CommandProcessor {
   bool Restore(::rex::stream::ByteStream* stream);
 
  protected:
+  // COTT: every register from kFirstPlainRegister up (render state, shader constants, fetch
+  // constants) only stores its value in WriteRegister: the special cases are all below it. A backend
+  // that does not override WriteRegister sets plain_register_writes_, and type 0 packets and register
+  // ranges then store those values directly. On the Switch the per-register WriteRegister path
+  // (virtual call, register info lookup, special cases) was ~15% of the command thread.
+  static constexpr uint32_t kFirstPlainRegister = 0x2000;
+  bool plain_register_writes_ = false;
+  void StoreRegister(uint32_t index, uint32_t value) {
+    if (plain_register_writes_ && index - kFirstPlainRegister <
+                                      uint32_t(RegisterFile::kRegisterCount - kFirstPlainRegister)) {
+      register_file_->values[index] = value;
+    } else {
+      WriteRegister(index, value);
+    }
+  }
+
   struct IndexBufferInfo {
     xenos::IndexFormat format = xenos::IndexFormat::kInt16;
     xenos::Endian endianness = xenos::Endian::kNone;
