@@ -12,6 +12,7 @@
 
 REXCVAR_DECLARE(std::string, driver_env);
 REXCVAR_DECLARE(int32_t, cott_switch_gpu_mhz);
+REXCVAR_DECLARE(int32_t, cott_switch_gpu_force_mhz);
 REXCVAR_DECLARE(std::string, cott_internal_resolution);
 
 #include <algorithm>
@@ -29,6 +30,7 @@ REXCVAR_DECLARE(std::string, cott_internal_resolution);
 
 extern "C" void RexSwitchApmPedirGpuMhz(int mhz);
 extern "C" void RexSwitchApmAplicar(void);
+extern "C" void RexSwitchApmForzarGpuMhz(int mhz);
 #endif
 
 class CottApp : public rex::ReXApp {
@@ -122,6 +124,7 @@ class CottApp : public rex::ReXApp {
     // does; sdk/src/ui/switch_apm.cpp). It is undone when the console is docked or the game ends.
     RexSwitchApmPedirGpuMhz(REXCVAR_GET(cott_switch_gpu_mhz));
     RexSwitchApmAplicar();
+    RexSwitchApmForzarGpuMhz(REXCVAR_GET(cott_switch_gpu_force_mhz));
     // Started by nxlink: the log also goes to the PC's terminal, live (see StartNxlinkStdout).
     if (nxlink_stdout_) {
       rex::AddSink(std::make_shared<spdlog::sinks::stdout_sink_mt>());

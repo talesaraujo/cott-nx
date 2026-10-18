@@ -195,6 +195,29 @@ struct Candidata {
  * They are sorted by EMC: first the one that does not touch the memory. Requesting one that does not
  * exist returns an error and changes nothing, so it is enough to list them and let the check decide.
  */
+/*
+ * Test only: the GPU clock set directly with clkrst, above anything apm offers in handheld mode
+ * (768 MHz is what the console runs at in the dock; pcv picks the voltage for whatever rate it is
+ * given). For measuring docked performance without a dock. The system may set the clock back on its
+ * own, as it did with the memory, so the watchdog sets it again every second and counts how often.
+ * Leaving the game resets it: the HOME menu applies its own performance configuration.
+ */
+std::atomic<u32> g_gpu_forzada_hz{0};
+std::atomic<int> g_gpu_reaplicada{0};
+
+bool FijarGpu(u32 hz) {
+  bool ok = false;
+  if (R_SUCCEEDED(clkrstInitialize())) {
+    ClkrstSession ses{};
+    if (R_SUCCEEDED(clkrstOpenSession(&ses, PcvModuleId_GPU, 3))) {
+      ok = R_SUCCEEDED(clkrstSetClockRate(&ses, hz));
+      clkrstCloseSession(&ses);
+    }
+    clkrstExit();
+  }
+  return ok;
+}
+
 constexpr Candidata kCandidatas[] = {
     {460, 0x92220008u, 1331},  // GPU 460,8 + EMC 1331,2: la buena
     {460, 0x92220007u, 1600},  // GPU 460.8 + EMC 1600: raises the RAM clock
@@ -211,6 +234,22 @@ extern "C" void RexSwitchApmPedirGpuMhz(int mhz) {
 
 extern "C" void RexSwitchApmPermitirRam1600(int permitir) {
   g_permitir_ram_1600.store(permitir != 0, std::memory_order_relaxed);
+}
+
+extern "C" void RexSwitchApmForzarGpuMhz(int mhz) {
+  if (mhz <= 0) {
+    return;
+  }
+  const u32 hz = u32(mhz) * 1000000u;
+  const bool ok = FijarGpu(hz);
+  u32 gpu = 0, emc = 0;
+  svcSleepThread(300000000ULL);
+  LeerRelojes(gpu, emc);
+  std::fprintf(stderr, "[apm] PRUEBA: GPU forzada a %d MHz con clkrst (%s): GPU %.1f MHz, memoria %.1f MHz\n",
+               mhz, ok ? "aceptado" : "RECHAZADO", double(gpu) / 1e6, double(emc) / 1e6);
+  if (ok) {
+    g_gpu_forzada_hz.store(hz, std::memory_order_relaxed);
+  }
 }
 
 extern "C" void RexSwitchApmAplicar(void) {
@@ -314,6 +353,17 @@ extern "C" void RexSwitchApmAplicar(void) {
 }
 
 extern "C" void RexSwitchApmVigilar(void) {
+  if (const u32 forzada = g_gpu_forzada_hz.load(std::memory_order_relaxed)) {
+    u32 gpu = 0, emc = 0;
+    if (LeerRelojes(gpu, emc) && gpu + kMargenHz < forzada) {
+      FijarGpu(forzada);
+      const int n = g_gpu_reaplicada.fetch_add(1, std::memory_order_relaxed) + 1;
+      if (n <= 3 || n % 30 == 0) {
+        std::fprintf(stderr, "[apm] PRUEBA: la GPU habia vuelto a %.1f MHz; se fuerza otra vez (%d veces)\n",
+                     double(gpu) / 1e6, n);
+      }
+    }
+  }
   const u32 emc0 = g_emc_original.load(std::memory_order_relaxed);
   if (emc0 == 0 || g_rendido_emc.load(std::memory_order_relaxed)) {
     return;  // nothing changed, or we already know this firmware does not allow it
@@ -351,5 +401,6 @@ extern "C" void RexSwitchApmVigilar(void) {
 extern "C" void RexSwitchApmPedirGpuMhz(int) {}
 extern "C" void RexSwitchApmPermitirRam1600(int) {}
 extern "C" void RexSwitchApmAplicar(void) {}
+extern "C" void RexSwitchApmForzarGpuMhz(int) {}
 extern "C" void RexSwitchApmVigilar(void) {}
 #endif  // REX_PLATFORM_SWITCH

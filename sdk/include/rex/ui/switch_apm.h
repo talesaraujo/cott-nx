@@ -28,6 +28,13 @@ void RexSwitchApmPermitirRam1600(int permitir);
 void RexSwitchApmAplicar(void);
 
 /*
+ * Test only: sets the GPU clock to mhz with clkrst, beyond the handheld configurations (768 = the
+ * docked clock), and keeps it there from RexSwitchApmVigilar. 0 does nothing. Called after
+ * RexSwitchApmAplicar.
+ */
+void RexSwitchApmForzarGpuMhz(int mhz);
+
+/*
  * One tick per second from the profile thread. If the memory clock went up on its own after the
  * configuration was applied (the clock change takes time, so an immediate check read the old
  * value), it is set back with clkrst to what the console had originally. It does nothing, and does

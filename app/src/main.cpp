@@ -22,4 +22,9 @@ REXCVAR_DEFINE_INT32(cott_switch_gpu_mhz, 460, "Graphics",
                      "384, or 0 to leave the system's 307.2 MHz. Docked the GPU runs at 768 MHz anyway.")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_INT32(cott_switch_gpu_force_mhz, 0, "Graphics",
+                     "Testing only: GPU clock set directly (clkrst), past the handheld configurations. "
+                     "768 is the docked clock, to measure docked performance without a dock. 0 = off.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 REX_DEFINE_APP(cott, CottApp::Create)
