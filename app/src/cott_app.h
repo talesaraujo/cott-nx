@@ -104,6 +104,9 @@ class CottApp : public rex::ReXApp {
     // after 8 pipelines with a black screen, no sound and a sluggish HOME menu (GPU stuck). On the PC
     // FBO reaches the title but goes black after it. 2026-10-16, Switch runs 1-6.
     SetIfNotRequested("render_target_path_vulkan", "fsi");
+    // The native renderer is the only one fast enough to play, so it is the default: started
+    // from hbmenu there is no command line to ask for it.
+    SetIfNotRequested("gpu_backend", "native");
     // The native renderer (Phase 3) needs buffer device addresses and descriptor arrays for the
     // translated shaders, and the folder they were generated into (tools/shaders; never committed).
     if (rex::cvar::GetFlagInfo("gpu_backend") != nullptr &&
