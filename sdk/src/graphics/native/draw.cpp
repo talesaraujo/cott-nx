@@ -881,7 +881,33 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
         !(base & 1)) {
       uint32_t* out = indices.data();
       uint32_t fast_lo = UINT32_MAX, fast_hi = 0;
-      for (uint32_t i = 0; i < index_count; ++i) {
+      uint32_t i = 0;
+#if defined(__aarch64__)
+      // 8 indices per step: byte swap, restart lanes to kRestart (excluded from the range), widen.
+      {
+        const uint16x8_t restart_value = vdupq_n_u16(uint16_t(restart_index));
+        const uint16x8_t restart_on = vdupq_n_u16(restart ? 0xFFFF : 0);
+        uint16x8_t lo8 = vdupq_n_u16(0xFFFF), hi8 = vdupq_n_u16(0);
+        bool any_lane = false;
+        for (; i + 8 <= index_count; i += 8) {
+          const uint16x8_t v =
+              vreinterpretq_u16_u8(vrev16q_u8(vld1q_u8(src + size_t(i) * 2)));
+          const uint16x8_t is_restart = vandq_u16(vceqq_u16(v, restart_value), restart_on);
+          lo8 = vminq_u16(lo8, vorrq_u16(v, is_restart));
+          hi8 = vmaxq_u16(hi8, vbicq_u16(v, is_restart));
+          any_lane |= vminvq_u16(is_restart) == 0;  // at least one lane is a real index
+          const uint32x4_t mask_low = vreinterpretq_u32_s32(vmovl_s16(vreinterpret_s16_u16(vget_low_u16(is_restart))));
+          const uint32x4_t mask_high = vreinterpretq_u32_s32(vmovl_high_s16(vreinterpretq_s16_u16(is_restart)));
+          vst1q_u32(out + i, vorrq_u32(vmovl_u16(vget_low_u16(v)), mask_low));
+          vst1q_u32(out + i + 4, vorrq_u32(vmovl_high_u16(v), mask_high));
+        }
+        if (any_lane) {
+          fast_lo = vminvq_u16(lo8);
+          fast_hi = vmaxvq_u16(hi8);
+        }
+      }
+#endif
+      for (; i < index_count; ++i) {
         uint16_t v;
         std::memcpy(&v, src + size_t(i) * 2, 2);
         const uint32_t raw = __builtin_bswap16(v);
@@ -1026,11 +1052,13 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
     for (uint32_t q = 0; q + 4 <= index_count; q += 4) {
       for (uint32_t i : {0u, 1u, 2u, 0u, 2u, 3u}) host_indices.push_back(indices[q + i] - lo);
     }
-  } else {
-    host_indices.reserve(index_count);
-    for (uint32_t index : indices) host_indices.push_back(index == kRestart ? kRestart : index - lo);
   }
-  if (host_indices.empty()) {
+  // The plain case draws the guest indices as they are, made relative to the lowest uploaded vertex
+  // by the draw's vertexOffset (the restart index is compared before the offset is added).
+  const bool plain_indices = !rectangles && !quads;
+  const std::vector<uint32_t>& draw_list = plain_indices ? indices : host_indices;
+  const int32_t vertex_offset = plain_indices ? -int32_t(lo) : 0;
+  if (draw_list.empty()) {
     return true;
   }
 
@@ -1256,12 +1284,12 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   }
   VkDeviceSize index_offset_bytes;
   uint8_t* index_out =
-      upload_.Allocate(VkDeviceSize(host_indices.size()) * 4, 4, index_offset_bytes);
+      upload_.Allocate(VkDeviceSize(draw_list.size()) * 4, 4, index_offset_bytes);
   if (!index_out) {
     SkipDraw(6, "upload memory full for this frame (raise native_upload_mb)");
     return true;
   }
-  std::memcpy(index_out, host_indices.data(), host_indices.size() * 4);
+  std::memcpy(index_out, draw_list.data(), draw_list.size() * 4);
 
   // 7. Descriptor sets for the textures (reused while the bindings do not change).
   VkDescriptorSet sets[4] = {last_sets_[0], static_sets_[0], static_sets_[1], last_sets_[1]};
@@ -1417,7 +1445,7 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
     dfn.vkCmdBindVertexBuffers(cb, 0, binding_count, vertex_buffers.data(), vertex_offsets.data());
   }
   dfn.vkCmdBindIndexBuffer(cb, upload_.buffer(), index_offset_bytes, VK_INDEX_TYPE_UINT32);
-  dfn.vkCmdDrawIndexed(cb, uint32_t(host_indices.size()), 1, 0, 0, 0);
+  dfn.vkCmdDrawIndexed(cb, uint32_t(draw_list.size()), 1, 0, vertex_offset, 0);
   ++draws_done_;
 
   // 10. EDRAM aliasing of depth clears. Color and depth share the EDRAM, and the game clears some color
