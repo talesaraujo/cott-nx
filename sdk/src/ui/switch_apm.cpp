@@ -65,6 +65,13 @@ namespace {
 std::atomic<int> g_pedido{0};
 std::atomic<bool> g_hecho{false};
 /*
+ * Started docked: the request waits for the first undocking (RexSwitchApmVigilar asks again). Once a
+ * configuration is accepted it is kept here and set again after every undocking, in case the system
+ * went back to its own handheld configuration while docked.
+ */
+std::atomic<bool> g_esperando_portatil{false};
+std::atomic<u32> g_config_puesta{0};
+/*
  * The escape hatch. By default no configuration that raises the RAM clock is accepted, even if that
  * means staying with the low GPU clock. If the firmware turned out not to have the "high GPU +
  * unchanged RAM" pair, setting this to true takes the RAM 1600 one anyway.
@@ -264,7 +271,10 @@ extern "C" void RexSwitchApmAplicar(void) {
     return;
   }
   if (modo != ApmPerformanceMode_Normal) {
-    std::fprintf(stderr, "[apm] la consola esta en sobremesa (modo %d): no se pide nada\n", int(modo));
+    std::fprintf(stderr, "[apm] la consola esta en sobremesa (modo %d): se pide al sacarla del dock\n",
+                 int(modo));
+    g_hecho.store(false);
+    g_esperando_portatil.store(true);
     return;
   }
 
@@ -315,6 +325,7 @@ extern "C" void RexSwitchApmAplicar(void) {
        * on a mode change or when waking from sleep.
        */
       g_emc_original.store(emc0, std::memory_order_relaxed);
+      g_config_puesta.store(c.config, std::memory_order_relaxed);
       std::fprintf(stderr,
                    "[apm] PUESTA la configuracion 0x%08X (tabla: GPU %d, EMC %d): GPU %.1f MHz (era "
                    "%.1f) y la memoria se queda en %.1f MHz, comprobada durante %.1f s seguidos; "
@@ -353,6 +364,27 @@ extern "C" void RexSwitchApmAplicar(void) {
 }
 
 extern "C" void RexSwitchApmVigilar(void) {
+  // Docked <-> handheld. Leaving the dock: the request still waiting is made now (it polls the clocks
+  // for 1.5 s, on this thread), or the accepted configuration is set again.
+  ApmPerformanceMode modo = ApmPerformanceMode_Invalid;
+  const bool modo_leido = R_SUCCEEDED(apmGetPerformanceMode(&modo));
+  {
+    static ApmPerformanceMode modo_anterior = ApmPerformanceMode_Invalid;
+    if (modo_leido) {
+      const bool al_portatil = modo == ApmPerformanceMode_Normal && modo_anterior != modo;
+      modo_anterior = modo;
+      if (al_portatil && g_esperando_portatil.exchange(false)) {
+        std::fprintf(stderr, "[apm] fuera del dock: se pide ahora la GPU de %d MHz\n",
+                     g_pedido.load(std::memory_order_relaxed));
+        RexSwitchApmAplicar();
+      } else if (const u32 config = g_config_puesta.load(std::memory_order_relaxed);
+                 al_portatil && config) {
+        const bool ok = R_SUCCEEDED(apmSetPerformanceConfiguration(ApmPerformanceMode_Normal, config));
+        std::fprintf(stderr, "[apm] fuera del dock: configuracion 0x%08X otra vez (%s)\n", config,
+                     ok ? "aceptada" : "RECHAZADA");
+      }
+    }
+  }
   if (const u32 forzada = g_gpu_forzada_hz.load(std::memory_order_relaxed)) {
     u32 gpu = 0, emc = 0;
     if (LeerRelojes(gpu, emc) && gpu + kMargenHz < forzada) {
@@ -367,6 +399,11 @@ extern "C" void RexSwitchApmVigilar(void) {
   const u32 emc0 = g_emc_original.load(std::memory_order_relaxed);
   if (emc0 == 0 || g_rendido_emc.load(std::memory_order_relaxed)) {
     return;  // nothing changed, or we already know this firmware does not allow it
+  }
+
+  // Docked the system runs the memory at 1600 MHz: that is its own configuration, not ours.
+  if (!modo_leido || modo != ApmPerformanceMode_Normal) {
+    return;
   }
 
   const int tic = g_tics_emc.fetch_add(1, std::memory_order_relaxed);

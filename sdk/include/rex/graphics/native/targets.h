@@ -22,6 +22,8 @@
  * stays in guest pixels (NativeImage::width and height too) and is converted at the Vulkan calls, edge
  * by edge with ToHost, so rectangles that touch in guest pixels still touch. Pixel shaders get the
  * inverse scale (g_PixelPosScale) to turn their pixel position back into guest pixels.
+ * The scale can change between frames (native_dynamic_resolution, NativeTargets::PrepareRescale):
+ * every image is then made again at the new size, the color ones stretched into it.
  *
  * What is covered: color render targets k_8_8_8_8(_GAMMA) and depth k_24_8 / k_24_8_FLOAT; copies to
  * k_8_8_8_8 (color) and k_24_8(_FLOAT) (depth, as R32_SFLOAT); clears of the whole image; and the Swap
@@ -31,12 +33,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <string>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
+#include <thread>
 #include <vector>
 
 #include <rex/graphics/xenos.h>
@@ -91,13 +95,15 @@ struct NativeImage {
   std::vector<VkRect2D> unread;
 };
 
-// native_resolution_scale, clamped to 0.5-1 (1 where it does not apply).
+// The current resolution scale, 0.5-1: native_resolution_scale at the start, then what
+// NativeTargets::FinishRescale set.
 float ResolutionScale();
-// A guest pixel edge (x, or x + width) in the scaled images.
-inline uint32_t ToHost(uint32_t guest) {
-  const float scale = ResolutionScale();
+// A guest pixel edge (x, or x + width) in images of that scale.
+inline uint32_t ToHostAt(uint32_t guest, float scale) {
   return scale == 1.0f ? guest : uint32_t(float(guest) * scale + 0.5f);
 }
+// A guest pixel edge (x, or x + width) in the scaled images.
+inline uint32_t ToHost(uint32_t guest) { return ToHostAt(guest, ResolutionScale()); }
 inline int32_t ToHost(int32_t guest) {
   return guest < 0 ? -int32_t(ToHost(uint32_t(-guest))) : int32_t(ToHost(uint32_t(guest)));
 }
@@ -130,6 +136,22 @@ class NativeTargets {
   std::function<void()> before_replace;
   // Once per frame: destroys the images replaced long enough ago.
   void RetireTick();
+  // A new resolution scale, in two steps, because the Switch's driver clears every new allocation on
+  // the CPU (making all the images again took 27-100 ms there, several frames):
+  //  - PrepareRescale makes every render target and resolve destination again at `scale` (0.5-1) on a
+  //    worker thread, while the frames keep using the old ones. False if one is under way already.
+  //  - Between frames (one frame uses one scale), once rescale_ready, FinishRescale switches to them:
+  //    the color images are stretched into the new ones, recorded into `cb`; depth is lost (the game
+  //    clears it every frame). Images the game made meanwhile are made there. Returns how many images
+  //    changed.
+  bool PrepareRescale(float scale);
+  bool rescale_under_way() const { return rescale_thread_.joinable(); }
+  bool rescale_ready() const {
+    return rescale_thread_.joinable() && rescale_done_.load(std::memory_order_acquire);
+  }
+  uint32_t FinishRescale(VkCommandBuffer cb);
+  // Called with each image about to be destroyed (the texture cache drops its views of it).
+  std::function<void(VkImage)> on_destroy_image;
   // Repeated color copies (native_coalesce_copies). The level's distortion particles each draw and then
   // copy the whole screen again, so the next one refracts the previous: a copy identical to the last one
   // (same registers, no clears) at most kCoalesceDraws draws later is deferred, and only the last of a
@@ -203,6 +225,22 @@ class NativeTargets {
                                uint32_t& strip_x_out);
   bool CreateImage(NativeImage& image, VkFormat format, VkImageAspectFlags aspect,
                    VkImageUsageFlags usage, uint32_t width, uint32_t height);
+  // The same at a given scale; touches nothing else (the rescale's worker thread calls it).
+  bool CreateImageAt(NativeImage& image, VkFormat format, VkImageAspectFlags aspect,
+                     VkImageUsageFlags usage, uint32_t width, uint32_t height, float scale) const;
+  // The images PrepareRescale makes, for the ones in targets_ and destinations_.
+  struct Prepared {
+    NativeImage* owner;
+    VkFormat format;
+    VkImageAspectFlags aspect;
+    VkImageUsageFlags usage;
+    uint32_t width, height;
+    NativeImage image;
+  };
+  std::vector<Prepared> prepared_;
+  std::thread rescale_thread_;
+  std::atomic<bool> rescale_done_{false};
+  float rescale_scale_ = 1.0f;
   void DestroyImage(NativeImage& image);
   void Widen(NativeImage& image, uint32_t width);
   struct Retired {
@@ -237,6 +275,8 @@ class NativeTargets {
   VkPipeline depth_copy_pipeline_ = VK_NULL_HANDLE;
   VkSampler depth_copy_sampler_ = VK_NULL_HANDLE;
   VkDescriptorPool depth_copy_pool_ = VK_NULL_HANDLE;
+  // Sets of destroyed images (the GPU is past them), for the next depth render targets.
+  std::vector<VkDescriptorSet> free_depth_copy_sets_;
   bool depth_copy_failed_ = false;
 
   // The last color copy made (for native_coalesce_copies) and whether a copy like it is pending.

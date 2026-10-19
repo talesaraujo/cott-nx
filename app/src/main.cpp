@@ -10,8 +10,9 @@ REXCVAR_DEFINE_STRING(driver_env, "", "Debug",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 REXCVAR_DEFINE_STRING(cott_internal_resolution, "auto", "Graphics",
-                      "Resolution the game draws at. auto: 576p if the game starts in handheld mode, 720p if "
-                      "it starts docked (kept for the whole session). 720p (1280x720, the Xbox 360's); 576p "
+                      "Resolution the game draws at. auto: dynamic (native_dynamic_resolution), from 0.6 to "
+                      "1 of 720p, keeping the GPU under 31 ms per frame; it starts at 576p in handheld "
+                      "mode and 720p docked and follows the dock. Fixed: 720p (1280x720, the Xbox 360's); 576p "
                       "(1024x576, episode 2 in handheld mode: 22.8 -> 28.9 FPS, GPU 43 -> 29 ms) or "
                       "540p (960x540), the game's 720p drawn smaller by the renderer "
                       "(native_resolution_scale 0.8 or 0.75); or 480p (640x480, the game's own widescreen "

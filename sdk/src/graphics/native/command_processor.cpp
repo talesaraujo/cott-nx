@@ -44,6 +44,18 @@ REXCVAR_DEFINE_BOOL(native_untile, true, "GPU/Native",
                     "as the whole screen: about 2/3 of the level's draws are replays of the other strips");
 REXCVAR_DEFINE_BOOL(native_log_indirect_buffers, false, "GPU/Native",
                     "Debugging: logs every indirect buffer of the profiled frame (address, size, bins, window)");
+REXCVAR_DEFINE_BOOL(native_dynamic_resolution, false, "GPU/Native",
+                    "Change the resolution scale while the game runs to keep the GPU time per frame "
+                    "under native_dynamic_resolution_target_ms: lower when a scene is heavy, higher "
+                    "when there is time to spare, in steps of 0.05 between native_dynamic_resolution_min "
+                    "and _max. Each change makes the render targets again (a few ms, once).");
+REXCVAR_DEFINE_DOUBLE(native_dynamic_resolution_min, 0.6, "GPU/Native",
+                      "Lowest scale of native_dynamic_resolution (0.6: 768x432 for the game's 720p)");
+REXCVAR_DEFINE_DOUBLE(native_dynamic_resolution_max, 1.0, "GPU/Native",
+                      "Highest scale of native_dynamic_resolution");
+REXCVAR_DEFINE_DOUBLE(native_dynamic_resolution_target_ms, 31.0, "GPU/Native",
+                      "GPU time per frame native_dynamic_resolution aims below. 31: a little under the "
+                      "33.3 ms of a 30 FPS frame.");
 REXCVAR_DEFINE_BOOL(native_present_last_resolve, false, "GPU/Native",
                     "Show the destination of the latest color resolve instead of the front buffer "
                     "(debugging the render targets before draws work)");
@@ -51,6 +63,8 @@ REXCVAR_DEFINE_BOOL(native_present_last_resolve, false, "GPU/Native",
 #if REX_PLATFORM_SWITCH
 // Game FPS for the console profiler (switch_perf.cpp): one count per guest present, as in the emulation.
 extern "C" void RexSwitchPerfCount(unsigned id);
+// The resolution the overlay shows.
+extern "C" void RexSwitchPerfResolution(unsigned width, unsigned height);
 #endif
 
 namespace rex::graphics::native {
@@ -81,6 +95,7 @@ bool NativeCommandProcessor::SetupContext() {
     EndRendering();
     if (frame_command_buffer_) targets_.FlushPendingCopy(frame_command_buffer_);
   };
+  targets_.on_destroy_image = [this](VkImage image) { textures_.ForgetImage(image); };
   targets_.gpu_mark_resolve = [this](uint32_t width, uint32_t height, uint32_t flags) {
     GpuMarkResolve(width, height, flags);
   };
@@ -88,6 +103,9 @@ bool NativeCommandProcessor::SetupContext() {
     return false;
   }
   report_start_ = std::chrono::steady_clock::now();
+#if REX_PLATFORM_SWITCH
+  RexSwitchPerfResolution(ToHost(1280u), ToHost(720u));
+#endif
   REXGPU_INFO("[native] native renderer, milestone M3c: draws with the translated shaders");
   return true;
 }
@@ -198,7 +216,14 @@ VkCommandBuffer NativeCommandProcessor::BeginSlot() {
         auto ns_between = [this](uint64_t from, uint64_t to) {
           return double((to - from) & timestamp_mask_) * timestamp_period_ns_ * timestamp_scale_;
         };
-        gpu_ns_ += ns_between(ticks[0], ticks[marks - 1]);
+        const double frame_ns = ns_between(ticks[0], ticks[marks - 1]);
+        gpu_ns_ += frame_ns;
+        if (dynamic_skip_) {
+          --dynamic_skip_;
+        } else {
+          dynamic_gpu_ns_ += frame_ns;
+          ++dynamic_frames_;
+        }
         for (uint32_t i = 0; i + 1 < marks; ++i) {
           gpu_kind_ns_[slot.mark_kinds[i]] += ns_between(ticks[i], ticks[i + 1]);
         }
@@ -687,6 +712,7 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
       gpu_gap_ns_ *= correction;
       for (double& ns : gpu_kind_ns_) ns *= correction;
       timestamp_scale_ *= correction;
+      timestamps_calibrated_ = true;
     }
     REXGPU_INFO("[native] {:.1f} swaps/s, {:.0f} draws ({:.0f} drawn) and {:.1f} copies per frame; "
                 "{} guest shaders, {} translated, {} pipelines; {} texture uploads ({} MB); "
@@ -753,6 +779,70 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     strip_windows_.clear();
     report_swaps_ = swaps_;
   }
+  UpdateDynamicResolution();
+}
+
+void NativeCommandProcessor::UpdateDynamicResolution() {
+  // Half a second of frames per decision; a higher scale only after two calm ones in a row.
+  constexpr uint32_t kWindowFrames = 15, kCalmWindows = 2;
+  constexpr double kRaiseMarginMs = 1.5;
+  // A change whose images are ready: the frame after this swap is the first at the new scale.
+  if (targets_.rescale_ready()) {
+    const auto start = std::chrono::steady_clock::now();
+    const uint32_t changed = targets_.FinishRescale(EnsureFrame());
+    const auto end = std::chrono::steady_clock::now();
+    // The frames in flight were recorded at the old scale; the next one also has the stretching.
+    dynamic_skip_ = uint32_t(kFrameSlots) + 1;
+    dynamic_gpu_ns_ = 0.0;
+    dynamic_frames_ = 0;
+    REXGPU_INFO("[native] dynamic resolution: GPU {:.1f} ms per frame at {:.2f} -> {:.2f} ({}x{}); {} "
+                "images made in {:.0f} ms on a worker thread, switched in {:.1f} ms",
+                dynamic_ms_, dynamic_from_, ResolutionScale(), ToHost(1280u), ToHost(720u), changed,
+                std::chrono::duration<double, std::milli>(end - dynamic_prepare_start_).count(),
+                std::chrono::duration<double, std::milli>(end - start).count());
+#if REX_PLATFORM_SWITCH
+    RexSwitchPerfResolution(ToHost(1280u), ToHost(720u));
+#endif
+    return;
+  }
+  // Until the first report has calibrated the timestamps, the Switch's GPU times are 1.6x too short.
+  if (!REXCVAR_GET(native_dynamic_resolution) || !timestamps_calibrated_ ||
+      targets_.rescale_under_way() || dynamic_frames_ < kWindowFrames) {
+    return;
+  }
+  const double ms = dynamic_gpu_ns_ / dynamic_frames_ * 1e-6;
+  dynamic_gpu_ns_ = 0.0;
+  dynamic_frames_ = 0;
+  // In twentieths (steps of 0.05).
+  const int lo = int(std::lround(std::clamp(REXCVAR_GET(native_dynamic_resolution_min), 0.5, 1.0) * 20));
+  const int hi = std::max(lo, int(std::lround(std::clamp(REXCVAR_GET(native_dynamic_resolution_max), 0.5, 1.0) * 20)));
+  const double target = REXCVAR_GET(native_dynamic_resolution_target_ms);
+  const float scale = ResolutionScale();
+  const int now = int(std::lround(scale * 20));
+  int next = std::clamp(now, lo, hi);
+  // The pixels' work goes with the square of the scale (720p -> 576p: GPU 43 -> 29 ms on the Switch);
+  // the rest does not, so going down may take two decisions and going up is cautious.
+  if (ms > target) {
+    const double ideal = scale * std::sqrt(target / ms);
+    next = std::min(now - 1, int(std::floor(ideal * 20 + 1e-3)));
+    dynamic_calm_ = 0;
+  } else if (now < hi) {
+    const double up = (now + 1) / 20.0;
+    const double predicted = ms * (up * up) / (double(scale) * scale);
+    dynamic_calm_ = predicted <= target - kRaiseMarginMs ? dynamic_calm_ + 1 : 0;
+    if (dynamic_calm_ >= kCalmWindows) {
+      next = now + 1;
+      dynamic_calm_ = 0;
+    }
+  }
+  next = std::clamp(next, lo, hi);
+  if (next == now) {
+    return;
+  }
+  dynamic_prepare_start_ = std::chrono::steady_clock::now();
+  dynamic_ms_ = ms;
+  dynamic_from_ = scale;
+  targets_.PrepareRescale(next / 20.0f);
 }
 
 }  // namespace rex::graphics::native

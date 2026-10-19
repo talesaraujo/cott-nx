@@ -223,6 +223,20 @@ void NativeTextures::Shutdown() {
   device_ = nullptr;
 }
 
+void NativeTextures::ForgetImage(VkImage image) {
+  if (!device_) {
+    return;
+  }
+  auto it = resolved_views_.find(image);
+  if (it == resolved_views_.end()) {
+    return;
+  }
+  for (auto& [swizzle, view] : it->second) {
+    device_->functions().vkDestroyImageView(device_->device(), view, nullptr);
+  }
+  resolved_views_.erase(it);
+}
+
 void NativeTextures::Unsupported(uint32_t format, const char* what) {
   if (unsupported_logged_.insert(format).second) {
     REXGPU_WARN("[native] texture format {} not supported yet ({}): sampled as black", format, what);

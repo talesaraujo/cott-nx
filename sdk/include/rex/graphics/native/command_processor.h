@@ -214,7 +214,18 @@ class NativeCommandProcessor : public CommandProcessor {
   // reports (timestampPeriod): every measured span came out 1/1.627 of the real one. Each report
   // compares the GPU timeline (frames plus the gaps between them) with the CPU clock.
   double timestamp_scale_ = 1.0;
+  bool timestamps_calibrated_ = false;
   uint64_t gpu_frames_ = 0;
+  // Dynamic resolution (native_dynamic_resolution): after each swap, from the GPU time of the frames
+  // measured since the last decision. The first frames after a change (drawn at the old scale, or
+  // stretching the images) are left out.
+  void UpdateDynamicResolution();
+  double dynamic_gpu_ns_ = 0.0;
+  uint32_t dynamic_frames_ = 0, dynamic_skip_ = 0, dynamic_calm_ = 0;
+  // The change under way (its images are being made on a worker thread), for the log.
+  std::chrono::steady_clock::time_point dynamic_prepare_start_;
+  double dynamic_ms_ = 0.0;
+  float dynamic_from_ = 1.0f;
   std::chrono::steady_clock::time_point record_start_;
 };
 

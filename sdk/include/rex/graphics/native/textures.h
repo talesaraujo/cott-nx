@@ -55,6 +55,9 @@ class NativeTextures {
   // Records the dummy images' clears; once, before the first draw.
   void InitializeDummies(VkCommandBuffer cb);
   void BeginFrame() { ++frame_; }
+  // The render target or resolve destination `image` is being destroyed: its views go with it (a new
+  // image could get the same handle).
+  void ForgetImage(VkImage image);
 
   // What a shader samples for the fetch constant. Uploads and layout changes are recorded into `cb`;
   // `before_commands` is called first (the caller ends its rendering pass).

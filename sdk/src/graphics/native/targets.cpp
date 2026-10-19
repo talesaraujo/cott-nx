@@ -31,7 +31,8 @@ REXCVAR_DEFINE_BOOL(native_coalesce_copies, true, "GPU/Native",
 REXCVAR_DEFINE_DOUBLE(native_resolution_scale, 1.0, "GPU/Native",
                       "Size of the render targets relative to what the game draws (0.5-1). 0.8 draws the "
                       "game's 1280x720 at 1024x576: 36% fewer pixels for the GPU to shade, a little "
-                      "blurrier. The picture is stretched back to the game's size when shown.")
+                      "blurrier. The picture is stretched back to the game's size when shown. With "
+                      "native_dynamic_resolution, the scale it starts at.")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(native_debug_tint_clears, false, "GPU/Native",
                     "Clear color render targets with a color that depends on the resolved strip's "
@@ -39,13 +40,19 @@ REXCVAR_DEFINE_BOOL(native_debug_tint_clears, false, "GPU/Native",
 
 namespace rex::graphics::native {
 
+namespace {
+
+// Below 0: not read from native_resolution_scale yet. Only the command processor's thread uses it.
+float g_resolution_scale = -1.0f;
+
+}  // namespace
+
 float ResolutionScale() {
-  // Read once: the images already made keep their size.
-  static const float scale = [] {
+  if (g_resolution_scale < 0.0f) {
     const double value = REXCVAR_GET(native_resolution_scale);
-    return std::isfinite(value) ? float(std::clamp(value, 0.5, 1.0)) : 1.0f;
-  }();
-  return scale;
+    g_resolution_scale = std::isfinite(value) ? float(std::clamp(value, 0.5, 1.0)) : 1.0f;
+  }
+  return g_resolution_scale;
 }
 
 namespace {
@@ -78,6 +85,11 @@ void NativeTargets::Shutdown() {
   if (!device_) {
     return;
   }
+  if (rescale_thread_.joinable()) rescale_thread_.join();
+  for (Prepared& p : prepared_) {
+    if (p.image.image) DestroyImage(p.image);
+  }
+  prepared_.clear();
   for (auto& [key, image] : targets_) {
     DestroyImage(*image);
   }
@@ -103,6 +115,7 @@ void NativeTargets::Shutdown() {
     dfn.vkDestroyDescriptorSetLayout(device_->device(), depth_copy_set_layout_, nullptr);
   }
   if (depth_copy_pool_) dfn.vkDestroyDescriptorPool(device_->device(), depth_copy_pool_, nullptr);
+  free_depth_copy_sets_.clear();
   if (depth_copy_sampler_) dfn.vkDestroySampler(device_->device(), depth_copy_sampler_, nullptr);
   depth_copy_pipeline_ = VK_NULL_HANDLE;
   depth_copy_layout_ = VK_NULL_HANDLE;
@@ -114,12 +127,18 @@ void NativeTargets::Shutdown() {
 
 bool NativeTargets::CreateImage(NativeImage& image, VkFormat format, VkImageAspectFlags aspect,
                                 VkImageUsageFlags usage, uint32_t width, uint32_t height) {
+  return CreateImageAt(image, format, aspect, usage, width, height, ResolutionScale());
+}
+
+bool NativeTargets::CreateImageAt(NativeImage& image, VkFormat format, VkImageAspectFlags aspect,
+                                  VkImageUsageFlags usage, uint32_t width, uint32_t height,
+                                  float scale) const {
   VkImageCreateInfo info = {};
   info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
   info.imageType = VK_IMAGE_TYPE_2D;
   info.format = format;
-  const uint32_t host_width = std::max(1u, ToHost(width));
-  const uint32_t host_height = std::max(1u, ToHost(height));
+  const uint32_t host_width = std::max(1u, ToHostAt(width, scale));
+  const uint32_t host_height = std::max(1u, ToHostAt(height, scale));
   info.extent = {host_width, host_height, 1};
   info.mipLevels = 1;
   info.arrayLayers = 1;
@@ -159,6 +178,8 @@ bool NativeTargets::CreateImage(NativeImage& image, VkFormat format, VkImageAspe
 
 void NativeTargets::DestroyImage(NativeImage& image) {
   const ui::vulkan::VulkanDevice::Functions& dfn = device_->functions();
+  if (image.image && on_destroy_image) on_destroy_image(image.image);
+  if (image.depth_copy_set) free_depth_copy_sets_.push_back(image.depth_copy_set);
   if (image.depth_view) dfn.vkDestroyImageView(device_->device(), image.depth_view, nullptr);
   if (image.view) dfn.vkDestroyImageView(device_->device(), image.view, nullptr);
   if (image.image) dfn.vkDestroyImage(device_->device(), image.image, nullptr);
@@ -176,10 +197,96 @@ void NativeTargets::Widen(NativeImage& image, uint32_t width) {
   REXGPU_INFO("[native] render target widened from {} to {} pixels (untiled pass)", image.width, width);
   wide.msaa = image.msaa;
   wide.last_use = image.last_use;
-  // The depth copy's descriptor set pointed at the old view: dropped (its pool is freed at shutdown).
-  image.depth_copy_set = VK_NULL_HANDLE;
+  // The depth copy's descriptor set points at the old view: it is freed with the old image.
   retired_.push_back({image, 0});
   image = wide;
+}
+
+bool NativeTargets::PrepareRescale(float scale) {
+  scale = std::clamp(scale, 0.5f, 1.0f);
+  if (rescale_thread_.joinable() || scale == ResolutionScale()) {
+    return false;
+  }
+  prepared_.clear();
+  auto add = [this](NativeImage& image) {
+    if (image.image) {
+      prepared_.push_back({&image, image.format, image.aspect, image.usage, image.width, image.height, {}});
+    }
+  };
+  for (auto& [key, image] : targets_) add(*image);
+  for (auto& [base, image] : destinations_) add(*image);
+  rescale_scale_ = scale;
+  rescale_done_.store(false, std::memory_order_relaxed);
+  rescale_thread_ = std::thread([this] {
+    for (Prepared& p : prepared_) {
+      if (!CreateImageAt(p.image, p.format, p.aspect, p.usage, p.width, p.height, rescale_scale_)) {
+        p.image = NativeImage{};
+      }
+    }
+    rescale_done_.store(true, std::memory_order_release);
+  });
+  return true;
+}
+
+uint32_t NativeTargets::FinishRescale(VkCommandBuffer cb) {
+  if (!rescale_ready()) {
+    return 0;
+  }
+  rescale_thread_.join();
+  if (before_replace) before_replace();  // also makes a pending copy
+  last_copy_valid_ = false;
+  g_resolution_scale = rescale_scale_;
+  std::unordered_map<NativeImage*, Prepared*> ready;
+  for (Prepared& p : prepared_) {
+    if (p.image.image) ready[p.owner] = &p;
+  }
+  const ui::vulkan::VulkanDevice::Functions& dfn = device_->functions();
+  uint32_t remade = 0;
+  auto remake = [&](NativeImage& image) {
+    if (!image.image) return;
+    NativeImage fresh;
+    auto it = ready.find(&image);
+    if (it != ready.end() && it->second->width == image.width && it->second->height == image.height &&
+        it->second->format == image.format && it->second->usage == image.usage) {
+      fresh = it->second->image;
+      it->second->image = NativeImage{};
+    } else if (!CreateImage(fresh, image.format, image.aspect, image.usage, image.width, image.height)) {
+      return;  // keeps the old size: drawn at the new scale, it shows the top left part
+    }
+    fresh.guest_base = image.guest_base;
+    fresh.guest_pitch = image.guest_pitch;
+    fresh.guest_height = image.guest_height;
+    fresh.guest_format = image.guest_format;
+    fresh.sample_scale = image.sample_scale;
+    fresh.swap_red_blue = image.swap_red_blue;
+    fresh.msaa = image.msaa;
+    fresh.last_use = image.last_use;
+    // Color, stretched: what a later frame reads before drawing it again (a previous frame kept for an
+    // effect) stays right. Depth as float (resolved depth) is not filtered.
+    if (image.aspect == VK_IMAGE_ASPECT_COLOR_BIT) {
+      Transition(cb, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+      Transition(cb, fresh, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+      VkImageBlit blit = {};
+      blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+      blit.srcOffsets[1] = {int32_t(image.host_width), int32_t(image.host_height), 1};
+      blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+      blit.dstOffsets[1] = {int32_t(fresh.host_width), int32_t(fresh.host_height), 1};
+      dfn.vkCmdBlitImage(cb, image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, fresh.image,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                         image.format == VK_FORMAT_R8G8B8A8_UNORM ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+    }
+    retired_.push_back({image, 0});
+    image = fresh;
+    ++remade;
+  };
+  for (auto& [key, image] : targets_) remake(*image);
+  for (auto& [base, image] : destinations_) remake(*image);
+  // Made for an image that changed meanwhile (widened): never used.
+  for (Prepared& p : prepared_) {
+    if (p.image.image) DestroyImage(p.image);
+  }
+  prepared_.clear();
+  return remade;
 }
 
 void NativeTargets::FlushPendingCopy(VkCommandBuffer cb) {
@@ -261,7 +368,7 @@ bool NativeTargets::EnsureDepthCopy() {
       VK_SUCCESS) {
     return false;
   }
-  // One set per depth render target, which live until shutdown (the pool goes with them).
+  // One set per depth render target; a destroyed one's set is reused.
   constexpr uint32_t kMaxSets = 64;
   VkDescriptorPoolSize pool_size = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxSets};
   VkDescriptorPoolCreateInfo pool_info = {};
@@ -384,7 +491,10 @@ bool NativeTargets::DepthCopy(VkCommandBuffer cb, NativeImage& src, NativeImage&
     allocate_info.descriptorPool = depth_copy_pool_;
     allocate_info.descriptorSetCount = 1;
     allocate_info.pSetLayouts = &depth_copy_set_layout_;
-    if (dfn.vkAllocateDescriptorSets(device, &allocate_info, &src.depth_copy_set) != VK_SUCCESS) {
+    if (!free_depth_copy_sets_.empty()) {
+      src.depth_copy_set = free_depth_copy_sets_.back();
+      free_depth_copy_sets_.pop_back();
+    } else if (dfn.vkAllocateDescriptorSets(device, &allocate_info, &src.depth_copy_set) != VK_SUCCESS) {
       src.depth_copy_set = VK_NULL_HANDLE;
       return false;
     }

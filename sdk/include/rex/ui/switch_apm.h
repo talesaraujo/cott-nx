@@ -21,9 +21,9 @@ void RexSwitchApmPedirGpuMhz(int mhz);
 void RexSwitchApmPermitirRam1600(int permitir);
 
 /*
- * Requests the profile. Does nothing if 0 was requested, if the console is docked, or if it was
- * already called. If the configuration does not exist in this firmware, apm returns an error and
- * changes nothing.
+ * Requests the profile. Does nothing if 0 was requested or if it was already called; docked, the
+ * request waits for the first undocking (RexSwitchApmVigilar makes it then). If the configuration
+ * does not exist in this firmware, apm returns an error and changes nothing.
  */
 void RexSwitchApmAplicar(void);
 

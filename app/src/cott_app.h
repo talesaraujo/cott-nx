@@ -95,13 +95,16 @@ class CottApp : public rex::ReXApp {
     // its 640x480 widescreen mode (it has no other: asked for 1024x576, it picks 640x480).
     std::string resolution = REXCVAR_GET(cott_internal_resolution);
     if (resolution == "auto") {
-      // Handheld, the GPU is the limit at 720p and 576p looks almost the same on the small screen;
-      // docked, the GPU has time to spare at 720p.
+      // Dynamic, as Breath of the Wild does: the renderer lowers the scale when the GPU would take
+      // more than a 30 FPS frame and raises it when there is time to spare (at most 720p). It starts
+      // at 576p in handheld mode (GPU 460.8 MHz: 720p takes ~43 ms there) and at 720p docked, and
+      // follows the dock: undocked, the GPU is 40% slower and the scale goes down in a second or two.
+      SetIfNotRequested("native_dynamic_resolution", "true");
       resolution = "720p";
 #if REX_PLATFORM_SWITCH
       if (appletGetOperationMode() == AppletOperationMode_Handheld) resolution = "576p";
 #endif
-      REXLOG_INFO("[cott] internal resolution auto: {}", resolution);
+      REXLOG_INFO("[cott] internal resolution auto: dynamic, starting at {}", resolution);
     }
     if (resolution == "480p") {
       SetIfNotRequested("video_mode_width", "640");
@@ -139,7 +142,8 @@ class CottApp : public rex::ReXApp {
     SetIfNotRequested("input_xbox_layout", "true");
     // The GPU is the limit in handheld mode (307.2 MHz). The system's performance configuration
     // 0x92220008 gives 460.8 MHz with the same memory clock, and any game may ask for it (nfsmw-nx
-    // does; sdk/src/ui/switch_apm.cpp). It is undone when the console is docked or the game ends.
+    // does; sdk/src/ui/switch_apm.cpp). Started docked, it is asked for when the console leaves the
+    // dock; it is set again after every undocking, and leaving the game undoes it.
     RexSwitchApmPedirGpuMhz(REXCVAR_GET(cott_switch_gpu_mhz));
     RexSwitchApmAplicar();
     RexSwitchApmForzarGpuMhz(REXCVAR_GET(cott_switch_gpu_force_mhz));
