@@ -32,8 +32,37 @@ Não é um emulador. O código PowerPC do `default.xex` do jogo é recompilado e
 5. **Fase 4, desempenho:** em andamento. No modo portátil, as fases rodam a ~29–31 FPS com resolução dinâmica
    (~0,75–0,9 do 720p); na base, em 720p, a ~28–30 FPS. Tudo nos clocks de fábrica.
 
-Também funcionam o co-op local, os saves, o som, os vídeos, os botões do Switch nos textos e o idioma escolhido
-pelo idioma do console (com uma tradução em português do Brasil).
+## Destaques
+
+### Feito para o Switch
+
+- **Botões do Switch, no layout do Switch.** Os botões valem pela posição, como no controle original: o botão de
+  baixo (o B da Nintendo) faz o que o A do Xbox fazia. As imagens dos botões do Xbox 360 nas dicas e menus do jogo
+  viram as do Switch correspondentes (A, B, X, Y, +, −, L, R, ZL, ZR). `cott_button_icons = "xbox"` traz de volta as
+  originais.
+- **"Nintendo Switch" no lugar de "Xbox 360"** nos textos do jogo (salvar e carregar, reconectar o controle, o
+  perfil), em todos os idiomas do jogo.
+- **O idioma do console.** O jogo segue o idioma do Switch, com inglês para os que ele não tem, e ganhou uma tradução
+  nova em português do Brasil. As letras que o português usa e as fontes do jogo não têm (ã, õ, Ê, Ô…) são desenhadas
+  nas fontes a partir dos próprios acentos do jogo.
+- **Co-op local** para dois jogadores com Joy-Con e Pro Controller, e saves funcionando.
+- **Ícone no menu de homebrew** feito com o logo e a arte do próprio jogo, gerado a partir da sua cópia (nada dele é
+  distribuído). O NRO também pode ser aberto por um forwarder na Home.
+
+### Renderização nativa, clocks de fábrica
+
+- **Sem emulação de GPU.** Um renderizador nativo em Vulkan (NVK no Tegra X1) lê os comandos de GPU do jogo e os
+  desenha direto, com os shaders do jogo traduzidos antes de jogar. O Xbox 360 desenhava cada quadro em três faixas
+  para caber na EDRAM; aqui a cena é desenhada uma vez só.
+- **Resolução dinâmica**, como no Breath of the Wild: entre 0,6 e 1,0 do 720p, ajustada a cada meio segundo para a
+  GPU caber no tempo do quadro. Ela acompanha a entrada e a saída da base, e as imagens novas são criadas numa thread
+  à parte, então a troca não engasga.
+- **Sem overclock.** No modo portátil, o port pede ao sistema o perfil oficial de GPU a 460,8 MHz, o mesmo que jogos
+  comerciais usam.
+- **Pontos quentes em código nativo, autoconferidos.** O decodificador de vídeo Bink e o skinning do jogo na CPU rodam
+  em C++ nativo. Cada um roda lado a lado com o original recompilado nas primeiras chamadas e, de vez em quando,
+  depois; qualquer diferença vai para o log e desliga a versão nativa.
+- **Consertados no caminho:** os diálogos em XMA 5.1 e os vídeos Bink da abertura tocam corretamente.
 
 ## Estrutura
 

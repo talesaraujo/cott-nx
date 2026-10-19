@@ -32,8 +32,37 @@ It is not an emulator. The PowerPC code of the game's `default.xex` is staticall
 5. **Phase 4, performance:** in progress. In handheld mode the levels run at ~29–31 FPS with dynamic resolution
    (~0.75–0.9 of 720p); docked, at 720p, ~28–30 FPS. All at stock clocks.
 
-Local co-op, saves, sound, videos, Switch buttons in the game's prompts and the language picked from the console's
-language (with a Brazilian Portuguese translation) also work.
+## Highlights
+
+### Made for the Switch
+
+- **Switch buttons, in the Switch layout.** Buttons work by position, as on the original controller: the bottom
+  button (Nintendo's B) does what the Xbox A did. The Xbox 360 button pictures in the game's tips and menus are
+  swapped for the matching Switch ones (A, B, X, Y, +, −, L, R, ZL, ZR). `cott_button_icons = "xbox"` brings back the
+  originals.
+- **"Nintendo Switch" instead of "Xbox 360"** in the game's texts (saving and loading, reconnecting the controller,
+  the profile), in all of the game's languages.
+- **The console's language.** The game follows the Switch's language, with English for the ones it does not have,
+  plus a new Brazilian Portuguese translation. The letters Portuguese needs and the game's fonts lack (ã, õ, Ê, Ô…)
+  are drawn into the fonts from the game's own accents.
+- **Local co-op** for two players with Joy-Con and Pro Controllers, and working saves.
+- **A homebrew menu icon** made from the game's own logo and art, generated from your copy of the game (nothing of it
+  is shipped). The NRO can also be opened from a HOME menu forwarder.
+
+### Native rendering, stock clocks
+
+- **No GPU emulation.** A native Vulkan renderer (NVK on the Tegra X1) reads the game's GPU commands and draws them
+  directly, with the game's shaders translated ahead of time. The Xbox 360 drew each frame in three tiles to fit its
+  EDRAM; here the scene is drawn once.
+- **Dynamic resolution**, as in Breath of the Wild: between 0.6 and 1.0 of 720p, adjusted every half second to keep
+  the GPU under budget. It follows docking and undocking, and the new images are made on a worker thread, so a change
+  does not stutter.
+- **No overclock.** In handheld mode the port asks the system for its official 460.8 MHz GPU profile, the same one
+  commercial games use.
+- **Hot spots in native code, self-checked.** The Bink video decoder and the game's CPU skinning run as native C++.
+  Each one runs side by side with the recompiled original on its first calls and now and then after that; any
+  difference is logged and turns the native version off.
+- **Fixed along the way:** the 5.1 XMA dialogue and the Bink opening videos play correctly.
 
 ## Layout
 
