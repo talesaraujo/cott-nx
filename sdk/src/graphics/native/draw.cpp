@@ -67,6 +67,8 @@ constexpr uint32_t kSharedBooleans = 256;
 constexpr uint32_t kSharedSwappedTexcoords = 260;
 constexpr uint32_t kSharedHalfPixelOffset = 264;
 constexpr uint32_t kSharedAlphaThreshold = 272;
+// 1 / native_resolution_scale: the pixel shaders' position (vPos) back in guest pixels.
+constexpr uint32_t kSharedPixelPosScale = 276;
 constexpr uint32_t kSharedTextureSampleScales = 288;
 constexpr uint32_t kSharedPosScale = 352;
 constexpr uint32_t kSharedPosOffset = 360;
@@ -746,10 +748,13 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
     return true;  // Writes nothing.
   }
   VkExtent2D target_extent = {UINT32_MAX, UINT32_MAX};
+  VkExtent2D host_extent = {UINT32_MAX, UINT32_MAX};  // the same in the scaled images
   for (NativeImage* target : targets) {
     if (target) {
       target_extent.width = std::min(target_extent.width, target->width);
       target_extent.height = std::min(target_extent.height, target->height);
+      host_extent.width = std::min(host_extent.width, target->host_width);
+      host_extent.height = std::min(host_extent.height, target->host_height);
     }
   }
   // 4X draws go to the 1X or 2X image of the same EDRAM area (NativeTargets::GetRenderTarget): a 4X
@@ -792,8 +797,13 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
     }
     return true;  // Fully clipped (another strip's part of the screen).
   }
-  const VkRect2D scissor = {{sx0 * int32_t(scale_x), sy0 * int32_t(scale_y)},
-                            {uint32_t(sx1 - sx0) * scale_x, uint32_t(sy1 - sy0) * scale_y}};
+  VkRect2D scissor = ToHost(sx0 * int32_t(scale_x), sy0 * int32_t(scale_y),
+                            uint32_t(sx1 - sx0) * scale_x, uint32_t(sy1 - sy0) * scale_y);
+  scissor.extent.width = std::min(scissor.extent.width, host_extent.width - uint32_t(scissor.offset.x));
+  scissor.extent.height = std::min(scissor.extent.height, host_extent.height - uint32_t(scissor.offset.y));
+  if (!scissor.extent.width || !scissor.extent.height) {
+    return true;  // Less than a pixel once scaled.
+  }
 
   // Window offset applied to vertices (PA_SU_SC_MODE_CNTL::vtx_window_offset_enable).
   int32_t window_x = 0, window_y = 0;
@@ -831,6 +841,11 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
   viewport.width *= float(scale_x);
   viewport.y *= float(scale_y);
   viewport.height *= float(scale_y);
+  const float resolution_scale = ResolutionScale();
+  viewport.x *= resolution_scale;
+  viewport.y *= resolution_scale;
+  viewport.width *= resolution_scale;
+  viewport.height *= resolution_scale;
   if (!std::isfinite(viewport.x) || !std::isfinite(viewport.y) || !std::isfinite(viewport.width) ||
       !std::isfinite(viewport.height) || viewport.width <= 0.0f || viewport.height <= 0.0f) {
     return true;  // Degenerate: no coverage.
@@ -1186,6 +1201,8 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
     }
   }
   std::memcpy(shared + kSharedHalfPixelOffset, half_pixel, 8);
+  const float pixel_pos_scale = 1.0f / ResolutionScale();
+  std::memcpy(shared + kSharedPixelPosScale, &pixel_pos_scale, 4);
   std::memcpy(shared + kSharedPosScale, pos_scale, 8);
   std::memcpy(shared + kSharedPosOffset, pos_offset, 8);
   {
@@ -1413,7 +1430,7 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
     depth_stencil.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     VkRenderingInfo rendering_info = {};
     rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-    rendering_info.renderArea = {{0, 0}, target_extent};
+    rendering_info.renderArea = {{0, 0}, host_extent};
     rendering_info.layerCount = 1;
     rendering_info.colorAttachmentCount = 2;
     rendering_info.pColorAttachments = colors;
@@ -1546,8 +1563,8 @@ bool NativeCommandProcessor::Draw(xenos::PrimitiveType prim_type, uint32_t index
       for (uint32_t i = 0; i < 4; ++i) {
         value.color.float32[i] = float((bits >> (i * 8)) & 0xFF) * (1.0f / 255.0f);
       }
-      const VkRect2D area = {{x0 * int32_t(scale_x), y0 * int32_t(scale_y)},
-                             {uint32_t(x1 - x0) * scale_x, uint32_t(y1 - y0) * scale_y}};
+      const VkRect2D area = ToHost(x0 * int32_t(scale_x), y0 * int32_t(scale_y),
+                                   uint32_t(x1 - x0) * scale_x, uint32_t(y1 - y0) * scale_y);
       EndRendering();
       for (NativeImage* color : aliases) {
         targets_.Transition(cb, *color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);

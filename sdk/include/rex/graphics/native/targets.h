@@ -17,12 +17,19 @@
  * The tiled layout makes that move non-linear, so the strip's x position is recovered by searching which
  * offset of an existing destination gives that address (see FindDestination).
  *
+ * Resolution scale (native_resolution_scale): render targets and resolve destinations are Vulkan
+ * images that many times the size the game asks for (0.8: 1280x720 drawn at 1024x576). Everything else
+ * stays in guest pixels (NativeImage::width and height too) and is converted at the Vulkan calls, edge
+ * by edge with ToHost, so rectangles that touch in guest pixels still touch. Pixel shaders get the
+ * inverse scale (g_PixelPosScale) to turn their pixel position back into guest pixels.
+ *
  * What is covered: color render targets k_8_8_8_8(_GAMMA) and depth k_24_8 / k_24_8_FLOAT; copies to
  * k_8_8_8_8 (color) and k_24_8(_FLOAT) (depth, as R32_SFLOAT); clears of the whole image; and the Swap
  * showing the destination texture at the front buffer address (M3b); draws into them (M3c).
  */
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -54,8 +61,11 @@ struct NativeImage {
   VkImageView view = VK_NULL_HANDLE;
   VkFormat format = VK_FORMAT_UNDEFINED;
   VkImageAspectFlags aspect = 0;
+  // In guest pixels; the Vulkan image is host_width x host_height (the resolution scale).
   uint32_t width = 0;
   uint32_t height = 0;
+  uint32_t host_width = 0;
+  uint32_t host_height = 0;
   VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
   VkImageUsageFlags usage = 0;
   // Destinations only: where the image lives in guest memory, and its tiled pitch and format.
@@ -80,6 +90,23 @@ struct NativeImage {
   // Destinations only: the rectangles copied in since a draw last sampled it (the copy statistics).
   std::vector<VkRect2D> unread;
 };
+
+// native_resolution_scale, clamped to 0.5-1 (1 where it does not apply).
+float ResolutionScale();
+// A guest pixel edge (x, or x + width) in the scaled images.
+inline uint32_t ToHost(uint32_t guest) {
+  const float scale = ResolutionScale();
+  return scale == 1.0f ? guest : uint32_t(float(guest) * scale + 0.5f);
+}
+inline int32_t ToHost(int32_t guest) {
+  return guest < 0 ? -int32_t(ToHost(uint32_t(-guest))) : int32_t(ToHost(uint32_t(guest)));
+}
+// A guest rectangle in the scaled images.
+inline VkRect2D ToHost(int32_t x, int32_t y, uint32_t width, uint32_t height) {
+  const int32_t x0 = ToHost(x), y0 = ToHost(y);
+  const int32_t x1 = ToHost(x + int32_t(width)), y1 = ToHost(y + int32_t(height));
+  return {{x0, y0}, {uint32_t(std::max(0, x1 - x0)), uint32_t(std::max(0, y1 - y0))}};
+}
 
 class NativeTargets {
  public:

@@ -614,13 +614,17 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
             targets_.Transition(cb, *source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             VkImageBlit blit = {};
             blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            blit.srcOffsets[1] = {int32_t(std::min(width, source->width)),
-                                  int32_t(std::min(height, source->height)), 1};
+            // The front buffer is the game's size in guest pixels; with native_resolution_scale its
+            // image is smaller and is stretched back here, filtered.
+            const uint32_t shown_width = std::min(width, source->width);
+            const uint32_t shown_height = std::min(height, source->height);
+            blit.srcOffsets[1] = {int32_t(std::min(ToHost(shown_width), source->host_width)),
+                                  int32_t(std::min(ToHost(shown_height), source->host_height)), 1};
             blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             blit.dstOffsets[1] = {int32_t(width), int32_t(height), 1};
             dfn.vkCmdBlitImage(cb, source->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                vk_context.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
-                               VK_FILTER_NEAREST);
+                               ResolutionScale() == 1.0f ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
           } else {
             const float t = float(swaps_ % 360) * (6.2831853f / 360.0f);
             VkClearColorValue color = {};

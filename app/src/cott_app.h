@@ -93,9 +93,24 @@ class CottApp : public rex::ReXApp {
     ApplyDriverEnv();
     // The game asks the kernel for the video mode and draws at 1280x720 or, for anything smaller, at
     // its 640x480 widescreen mode (it has no other: asked for 1024x576, it picks 640x480).
-    if (REXCVAR_GET(cott_internal_resolution) == "480p") {
+    std::string resolution = REXCVAR_GET(cott_internal_resolution);
+    if (resolution == "auto") {
+      // Handheld, the GPU is the limit at 720p and 576p looks almost the same on the small screen;
+      // docked, the GPU has time to spare at 720p.
+      resolution = "720p";
+#if REX_PLATFORM_SWITCH
+      if (appletGetOperationMode() == AppletOperationMode_Handheld) resolution = "576p";
+#endif
+      REXLOG_INFO("[cott] internal resolution auto: {}", resolution);
+    }
+    if (resolution == "480p") {
       SetIfNotRequested("video_mode_width", "640");
       SetIfNotRequested("video_mode_height", "480");
+    } else if (resolution == "576p") {
+      // In between, done by the native renderer: the game draws 720p into render targets 0.8 the size.
+      SetIfNotRequested("native_resolution_scale", "0.8");
+    } else if (resolution == "540p") {
+      SetIfNotRequested("native_resolution_scale", "0.75");
     }
     // Without a GPU plugin the game runs but every graphics call is discarded: black screen.
     SetIfNotRequested("gpu_plugin", "xenos");

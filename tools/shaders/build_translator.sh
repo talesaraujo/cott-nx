@@ -75,7 +75,21 @@ for old, new in (('            case ControlFlowOpcode::LoopEnd:\n               
                   '                        println("\\t\\t\\tif (aL < g_LoopCount({}))", uint32_t(cfInstr.loopEnd.loopId));\n')):
     assert old in s, 'shader_recompiler.cpp changed upstream: ' + old[:40]
     s = s.replace(old, new, 1)
+# Resolution scale (native_resolution_scale): the render targets can be smaller than the game asks for,
+# so the pixel position (vPos) comes back to guest pixels through the shared constant at byte 276
+# (c17.y), 1 / scale; 1 when the scale is off, which gives what the shaders had before.
+old = 'out += "float4((iPos.xy - 0.5) * float2(iFace ? 1.0 : -1.0, 1.0), 0.0, 0.0);\\n";'
+assert old in s, 'shader_recompiler.cpp changed upstream: vPos'
+s = s.replace(old, 'out += "float4((iPos.xy * g_PixelPosScale - 0.5) * float2(iFace ? 1.0 : -1.0, 1.0), 0.0, 0.0);\\n";', 1)
 open(recompiler, 'w').write(s)
+c = open(common).read()
+for old, new in (('#define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 272)\n',
+                  '#define g_PixelPosScale            vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 276)\n'),
+                 ('    float g_AlphaThreshold : packoffset(c17.x); \\\n',
+                  '    float g_PixelPosScale : packoffset(c17.y); \\\n')):
+    assert old in c, 'shader_common.h changed upstream: ' + old[:40]
+    c = c.replace(old, old + new, 1)
+open(common, 'w').write(c)
 # Linearize every shader whose jumps all go forward, not only the one MojoRecomp lists: XenosRecomp
 # emits shaders with jumps as a while (true) { switch (pc) } state machine that the GPU compiler cannot
 # optimize across, and the menu's 2D shader (ps_DD3269CF5A041FA2) is one. MojoRecomp's rewrite turns

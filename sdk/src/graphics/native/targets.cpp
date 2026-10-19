@@ -28,11 +28,25 @@ REXCVAR_DEFINE_BOOL(native_coalesce_copies, true, "GPU/Native",
                     "Make only the last of a run of identical color resolves a few draws apart (the "
                     "level's distortion particles copy the whole screen after each one: ~6 ms of GPU per "
                     "frame at 720p on the Switch). The particles of a run then do not refract each other.");
+REXCVAR_DEFINE_DOUBLE(native_resolution_scale, 1.0, "GPU/Native",
+                      "Size of the render targets relative to what the game draws (0.5-1). 0.8 draws the "
+                      "game's 1280x720 at 1024x576: 36% fewer pixels for the GPU to shade, a little "
+                      "blurrier. The picture is stretched back to the game's size when shown.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(native_debug_tint_clears, false, "GPU/Native",
                     "Clear color render targets with a color that depends on the resolved strip's "
                     "position instead of the game's clear color (checks the strip mapping)");
 
 namespace rex::graphics::native {
+
+float ResolutionScale() {
+  // Read once: the images already made keep their size.
+  static const float scale = [] {
+    const double value = REXCVAR_GET(native_resolution_scale);
+    return std::isfinite(value) ? float(std::clamp(value, 0.5, 1.0)) : 1.0f;
+  }();
+  return scale;
+}
 
 namespace {
 
@@ -104,7 +118,9 @@ bool NativeTargets::CreateImage(NativeImage& image, VkFormat format, VkImageAspe
   info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
   info.imageType = VK_IMAGE_TYPE_2D;
   info.format = format;
-  info.extent = {width, height, 1};
+  const uint32_t host_width = std::max(1u, ToHost(width));
+  const uint32_t host_height = std::max(1u, ToHost(height));
+  info.extent = {host_width, host_height, 1};
   info.mipLevels = 1;
   info.arrayLayers = 1;
   info.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -115,7 +131,8 @@ bool NativeTargets::CreateImage(NativeImage& image, VkFormat format, VkImageAspe
   if (!ui::vulkan::util::CreateDedicatedAllocationImage(device_, info,
                                                         ui::vulkan::util::MemoryPurpose::kDeviceLocal,
                                                         image.image, image.memory)) {
-    REXGPU_ERROR("[native] could not create a {}x{} image (format {})", width, height, int(format));
+    REXGPU_ERROR("[native] could not create a {}x{} image (format {})", host_width, host_height,
+                 int(format));
     return false;
   }
   VkImageViewCreateInfo view_info = {};
@@ -133,6 +150,8 @@ bool NativeTargets::CreateImage(NativeImage& image, VkFormat format, VkImageAspe
   image.aspect = aspect;
   image.width = width;
   image.height = height;
+  image.host_width = host_width;
+  image.host_height = host_height;
   image.layout = VK_IMAGE_LAYOUT_UNDEFINED;
   image.usage = usage;
   return true;
@@ -733,6 +752,17 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
           dest_y < dest->height) {
         const uint32_t w = std::min({width, src->width - src_x, dest->width - dest_x});
         const uint32_t h = std::min({height, src->height - src_y, dest->height - dest_y});
+        // The same rectangle in the scaled images (both edges of each, so neighbours still touch).
+        const VkRect2D src_host = ToHost(int32_t(src_x), int32_t(src_y), w, h);
+        const VkRect2D dest_host = ToHost(int32_t(dest_x), int32_t(dest_y), w, h);
+        const uint32_t hsx = uint32_t(src_host.offset.x), hsy = uint32_t(src_host.offset.y);
+        const uint32_t hdx = uint32_t(dest_host.offset.x), hdy = uint32_t(dest_host.offset.y);
+        const uint32_t hw = std::min({src_host.extent.width, dest_host.extent.width,
+                                      src->host_width - std::min(hsx, src->host_width),
+                                      dest->host_width - std::min(hdx, dest->host_width)});
+        const uint32_t hh = std::min({src_host.extent.height, dest_host.extent.height,
+                                      src->host_height - std::min(hsy, src->host_height),
+                                      dest->host_height - std::min(hdy, dest->host_height)});
         ++(copy_depth ? depth_copies_ : color_copies_);
         copied_pixels_ += uint64_t(w) * h;
         uint32_t overwritten = 0;
@@ -759,10 +789,11 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
                       trace_draw, copy_depth ? "depth" : "color", src_original, src_x, src_y, dest_base,
                       dest_x, dest_y, w, h, overwritten);
         }
-        if ((REXCVAR_GET(native_debug_skip_copies) & (copy_depth ? 1 : 2)) && (copy_depth || w < 1280)) {
-          // Measuring only (native_debug_skip_copies).
+        if (((REXCVAR_GET(native_debug_skip_copies) & (copy_depth ? 1 : 2)) && (copy_depth || w < 1280)) ||
+            !hw || !hh) {
+          // Measuring only (native_debug_skip_copies), or nothing left once scaled.
         } else {
-        if (copy_depth && DepthCopy(cb, *src, *dest, src_x, src_y, dest_x, dest_y, w, h)) {
+        if (copy_depth && DepthCopy(cb, *src, *dest, hsx, hsy, hdx, hdy, hw, hh)) {
           // Done by the draw.
         } else {
         Transition(cb, *src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -770,10 +801,10 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
         if (!copy_depth) {
           VkImageCopy region = {};
           region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-          region.srcOffset = {int32_t(src_x), int32_t(src_y), 0};
+          region.srcOffset = {int32_t(hsx), int32_t(hsy), 0};
           region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-          region.dstOffset = {int32_t(dest_x), int32_t(dest_y), 0};
-          region.extent = {w, h, 1};
+          region.dstOffset = {int32_t(hdx), int32_t(hdy), 0};
+          region.extent = {hw, hh, 1};
           dfn.vkCmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dest->image,
                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
           last_color_destination_ = dest;
@@ -785,13 +816,13 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
             last_copy_region_ = region;
             last_copy_draw_ = trace_draw;
           }
-        } else if (EnsureStagingBuffer(VkDeviceSize(w) * h * 4)) {
+        } else if (EnsureStagingBuffer(VkDeviceSize(hw) * hh * 4)) {
           VkBufferImageCopy to_buffer = {};
-          to_buffer.bufferRowLength = w;
-          to_buffer.bufferImageHeight = h;
+          to_buffer.bufferRowLength = hw;
+          to_buffer.bufferImageHeight = hh;
           to_buffer.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
-          to_buffer.imageOffset = {int32_t(src_x), int32_t(src_y), 0};
-          to_buffer.imageExtent = {w, h, 1};
+          to_buffer.imageOffset = {int32_t(hsx), int32_t(hsy), 0};
+          to_buffer.imageExtent = {hw, hh, 1};
           dfn.vkCmdCopyImageToBuffer(cb, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging_,
                                      1, &to_buffer);
           VkBufferMemoryBarrier buffer_barrier = {};
@@ -806,7 +837,7 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
                                    0, 0, nullptr, 1, &buffer_barrier, 0, nullptr);
           VkBufferImageCopy to_image = to_buffer;
           to_image.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-          to_image.imageOffset = {int32_t(dest_x), int32_t(dest_y), 0};
+          to_image.imageOffset = {int32_t(hdx), int32_t(hdy), 0};
           dfn.vkCmdCopyBufferToImage(cb, staging_, dest->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                      1, &to_image);
           // The next depth copy reuses the buffer.
@@ -833,8 +864,13 @@ void NativeTargets::Resolve(VkCommandBuffer cb, const RegisterFile& regs,
     if (x >= image.width || y >= image.height) {
       return;
     }
-    const VkRect2D area = {{int32_t(x), int32_t(y)},
-                           {std::min(width, image.width - x), std::min(height, image.height - y)}};
+    VkRect2D area = ToHost(int32_t(x), int32_t(y), std::min(width, image.width - x),
+                           std::min(height, image.height - y));
+    area.extent.width = std::min(area.extent.width, image.host_width - uint32_t(area.offset.x));
+    area.extent.height = std::min(area.extent.height, image.host_height - uint32_t(area.offset.y));
+    if (!area.extent.width || !area.extent.height) {
+      return;
+    }
     Transition(cb, image,
                depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
                      : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -897,7 +933,7 @@ void NativeTargets::DumpImages(const std::string& dir, const std::function<VkCom
   const VkDevice device = device_->device();
   auto dump = [&](NativeImage& image, const std::string& name) {
     const bool depth = image.aspect & VK_IMAGE_ASPECT_DEPTH_BIT;
-    const uint32_t width = image.width, height = std::min(image.height, 720u);
+    const uint32_t width = image.host_width, height = std::min(image.host_height, ToHost(720u));
     const VkDeviceSize size = VkDeviceSize(width) * height * 4;
     VkBuffer buffer;
     VkDeviceMemory memory;
