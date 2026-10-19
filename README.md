@@ -3,7 +3,8 @@
 Port nativo e não oficial da versão de Xbox 360 de **Crash of the Titans** (2007) para o Nintendo Switch.
 
 > [!WARNING]
-> **Em desenvolvimento inicial. Ainda não roda.** Este repositório é privado e serve de base de trabalho.
+> **Em desenvolvimento.** O jogo roda inteiro no Switch e é jogável, mas ainda há trabalho de desempenho e
+> acabamento. Este repositório é privado e serve de base de trabalho.
 
 Não é um emulador. O código PowerPC do `default.xex` do jogo é recompilado estaticamente para C++ com
 [ReXGlue](https://github.com/rexglue/rexglue-sdk) e compilado para o Switch, seguindo o caminho aberto pelo
@@ -22,13 +23,15 @@ Não é um emulador. O código PowerPC do `default.xex` do jogo é recompilado e
 
 ## Onde estamos
 
-Em resumo:
-
 1. **Fase 0, extrair o disco e identificar o executável:** concluída.
-2. **Fase 1, rodar no PC (Linux) com ReXGlue:** em andamento.
-3. **Fase 2, levar para o Switch com a GPU emulada.**
-4. **Fase 3, renderizador nativo em Vulkan e shaders traduzidos antes de jogar.**
-5. **Fase 4, desempenho:** 30 FPS nos clocks de fábrica.
+2. **Fase 1, rodar no PC (Linux) com ReXGlue:** concluída.
+3. **Fase 2, levar para o Switch:** concluída.
+4. **Fase 3, renderizador nativo em Vulkan e shaders traduzidos antes de jogar:** concluída.
+5. **Fase 4, desempenho:** em andamento. No modo portátil, as fases rodam a ~29–31 FPS com resolução dinâmica
+   (~0,75–0,9 do 720p); na base, em 720p, a ~28–30 FPS. Tudo nos clocks de fábrica.
+
+Também funcionam o co-op local, os saves, o som, os vídeos, os botões do Switch nos textos e o idioma escolhido
+pelo idioma do console (com uma tradução em português do Brasil).
 
 ## Estrutura
 
@@ -48,7 +51,13 @@ cmake --build out/host --target rexglue
 # o executável fica em sdk/out/linux-amd64/rexglue
 ```
 
-No Fedora, os pacotes de desenvolvimento necessários são os de compilar o SDK (SDL3, GTK3, shaderc).
+No Fedora, os pacotes de desenvolvimento necessários:
+
+```sh
+sudo dnf install gtk3-devel glslc libshaderc-devel libXcursor-devel libXi-devel libXrandr-devel libXScrnSaver-devel \
+  libXfixes-devel wayland-protocols-devel libdecor-devel mesa-libEGL-devel mesa-libGL-devel mesa-libgbm-devel \
+  pipewire-devel pulseaudio-libs-devel alsa-lib-devel dbus-devel systemd-devel libusb1-devel
+```
 
 ## Extrair o jogo
 
