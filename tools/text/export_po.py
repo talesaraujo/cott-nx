@@ -11,7 +11,8 @@ written as {A}, {B}, {START}...; keep them. Any .po editor works (Poedit, Lokali
 with no letters (a lone button picture) are left out.
 
 If the output exists, its translations are kept (by msgid); texts no longer in the game are dropped and
-counted.
+counted. Texts it does not have take the translation in translations/<lang>.txt (tools/text/compile_po.py),
+so a new .po starts from the translation in the repository.
 
 The .po holds the game's English text, so it is game data: translations/work/ is in .gitignore.
 """
@@ -94,6 +95,8 @@ def main():
         if '%s:%04X' % (bank, h) not in where:
             where.append('%s:%04X' % (bank, h))
     old = read_po(out)
+    # Translations already made (translations/<lang>.txt), for texts the .po does not have yet.
+    table = textbible.read_table(os.path.join(ROOT, 'translations', args.lang + '.txt'))
 
     os.makedirs(os.path.dirname(out), exist_ok=True)
     kept = 0
@@ -103,7 +106,7 @@ def main():
                 'msgid ""\nmsgstr ""\n"Project-Id-Version: cott-nx\\n"\n"MIME-Version: 1.0\\n"\n"Content-Type: text/plain; charset=UTF-8\\n"\n"Content-Transfer-Encoding: 8bit\\n"\n"Language: %s\\n"\n\n' % args.lang)
         for text, (where, es) in entries.items():
             msgid = textbible.to_tags(text)
-            msgstr = old.get(msgid, '')
+            msgstr = old.get(msgid) or table.get(textbible.text_key(text), '')
             kept += bool(msgstr)
             f.write('#: %s\n' % ' '.join(where[:6] + (['...'] if len(where) > 6 else [])))
             if es and es != text:

@@ -10,6 +10,8 @@
 #include <rex/logging.h>
 #include <rex/rex_app.h>
 
+#include "cott_language.h"
+
 REXCVAR_DECLARE(std::string, driver_env);
 REXCVAR_DECLARE(int32_t, cott_switch_gpu_mhz);
 REXCVAR_DECLARE(int32_t, cott_switch_gpu_force_mhz);
@@ -115,6 +117,8 @@ class CottApp : public rex::ReXApp {
     } else if (resolution == "540p") {
       SetIfNotRequested("native_resolution_scale", "0.75");
     }
+    // cott_language (src/cott_language.cpp): the game's language, from the Switch's when "auto".
+    CottLanguageConfigure();
     // Without a GPU plugin the game runs but every graphics call is discarded: black screen.
     SetIfNotRequested("gpu_plugin", "xenos");
     // Render targets through fragment shader interlock (RADV on the PC, NVK on the Tegra X1). With

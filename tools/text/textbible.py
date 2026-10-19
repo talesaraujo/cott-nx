@@ -25,6 +25,7 @@ These are the game's own texts: whatever is read here stays out of the repositor
 """
 import bisect
 import mmap
+import os
 import struct
 
 TEXT_BIBLE = 0x1800D
@@ -60,6 +61,35 @@ def text_key(text):
         h ^= unit
         h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
     return h
+
+
+def escape(text):
+    return text.replace('\\', '\\\\').replace('\n', '\\n').replace('\t', '\\t')
+
+
+def unescape(text):
+    out, i = [], 0
+    while i < len(text):
+        if text[i] == '\\' and i + 1 < len(text):
+            out.append({'n': '\n', 't': '\t'}.get(text[i + 1], text[i + 1]))
+            i += 2
+        else:
+            out.append(text[i])
+            i += 1
+    return ''.join(out)
+
+
+def read_table(path):
+    """{key: translation} of a translations/<lang>.txt (tools/text/compile_po.py)."""
+    table = {}
+    if os.path.exists(path):
+        with open(path, encoding='utf-8') as f:
+            for line in f:
+                line = line.rstrip('\n')
+                if line and not line.startswith('#') and '\t' in line:
+                    key, _, text = line.partition('\t')
+                    table[int(key, 16)] = unescape(text)
+    return table
 
 
 def _name(m, p):

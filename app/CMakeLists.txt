@@ -17,6 +17,7 @@ set(COTT_SOURCES
     src/cott_bink.cpp
     src/cott_prompt_icons.cpp
     src/cott_switch_text.cpp
+    src/cott_language.cpp
 )
 
 if(WIN32)
@@ -26,6 +27,19 @@ else()
 endif()
 
 rexglue_setup_target(cott GPU_PLUGINS xenos)
+
+# The Brazilian Portuguese translation (translations/pt_BR.txt, made by tools/text/compile_po.py), built
+# into the executable as bytes.
+set(COTT_PT_BR "${CMAKE_CURRENT_SOURCE_DIR}/../translations/pt_BR.txt")
+set(COTT_PT_BR_INC "${CMAKE_CURRENT_BINARY_DIR}/generated_text/cott_translation_pt_BR.inc")
+add_custom_command(
+    OUTPUT "${COTT_PT_BR_INC}"
+    COMMAND ${CMAKE_COMMAND} -DIN=${COTT_PT_BR} -DOUT=${COTT_PT_BR_INC} -DNAME=kPortuguese
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_text.cmake"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_text.cmake" "${COTT_PT_BR}"
+    COMMENT "Embedding translations/pt_BR.txt")
+target_sources(cott PRIVATE "${COTT_PT_BR_INC}")
+target_include_directories(cott PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated_text")
 
 # PC build with the SDK as a subdirectory: rex_app.cpp includes imgui.h and rexruntime links imgui
 # privately, so its include path does not reach the executable (same fix as nfsmw-nx). On Switch

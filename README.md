@@ -56,6 +56,20 @@ No Fedora, os pacotes de desenvolvimento necessários são os de compilar o SDK 
 python3 tools/fase1_extraer.py "Crash of the Titans (USA).iso" -o assets/game_root
 ```
 
+## Idioma
+
+O idioma do jogo é escolhido pela opção `cott_language`, no `cott.toml` ao lado do `cott.nro`:
+
+```toml
+cott_language = "en"   # auto (padrão), en, fr, de, es, it ou pt-BR
+```
+
+- `auto` segue o idioma do Switch. Com o Switch em português, entra o pt-BR.
+- `pt-BR` é a tradução em português do Brasil feita pelo port: textos em português e vozes em inglês, a dublagem
+  original. Nenhum idioma do jogo é substituído; com `en`, o jogo fica exatamente como era.
+
+A tradução fica em [`translations/`](translations/README.md), que explica como ajudar a melhorá-la.
+
 ## Créditos
 
 - **Radical Entertainment e Vivendi Games / Activision**, criadores de Crash of the Titans. Este é um port de fãs,

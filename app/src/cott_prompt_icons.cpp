@@ -42,6 +42,8 @@
 // later (when the palettes are there); with cott_prompt_icons_dump=<folder> each page is written to a file
 // (indices + palette). PC only: those files are the game's data and stay out of the repo.
 
+#include "cott_font_pages.h"
+#include "cott_language.h"
 #include "cott_prompt_icons_data.h"
 
 #include <rex/cvar.h>
@@ -72,91 +74,10 @@ REXCVAR_DEFINE_STRING(cott_prompt_icons_dump, "", "Debug",
 
 namespace {
 
-constexpr uint32_t kTextureFontVtable = 0x82035594, kTextureVtable = 0x82034000;
-constexpr uint32_t kFontPageCount = 60, kFontPages = 64, kFontGlyphCount = 72, kFontGlyphs = 76,
-                   kFontCharacters = 84, kGlyphSize = 40;
-constexpr uint32_t kTexturePddi = 24, kPddiD3D = 20, kPddiPalettes = 24, kPddiNextPalette = 88,
-                   kD3DFetch = 28;
-constexpr uint32_t kFormat8 = 2, kFormat8888 = 6;
+using namespace cott_font_pages;
+
 constexpr uint32_t kCheckEvery = 8;    // frames
 constexpr uint32_t kTextureTries = 16;  // checks a new texture gets to show a button picture
-
-uint32_t Load32(const uint8_t* base, uint32_t address) {
-  uint32_t value;
-  std::memcpy(&value, base + address, 4);
-  return rex::byte_swap(value);
-}
-uint16_t Load16(const uint8_t* base, uint32_t address) {
-  uint16_t value;
-  std::memcpy(&value, base + address, 2);
-  return rex::byte_swap(value);
-}
-
-// Heap and physical addresses (fonts live at 0xF7xxxxxx).
-bool Plausible(uint32_t address) { return address >= 0x40000000 && address < 0xFFFF0000; }
-
-uint64_t Fnv(const uint8_t* p, size_t n, uint64_t h = 0xcbf29ce484222325ull) {
-  for (size_t i = 0; i < n; ++i) h = (h ^ p[i]) * 0x100000001b3ull;
-  return h;
-}
-
-// One font page as the GPU reads it.
-struct Page {
-  uint32_t width = 0, height = 0, pitch = 0;
-  uint32_t pixels = 0, palette = 0;  // guest addresses (through the 0xA0000000 physical view), see below
-  bool ok = false;                   // k_8, linear, 256x1 k_8_8_8_8 palette, sane sizes
-
-  // The index rows only: the palette is filled after the load and can change.
-  uint64_t Hash(const uint8_t* base) const {
-    uint64_t h = 0xcbf29ce484222325ull;
-    for (uint32_t y = 0; y < height; ++y) h = Fnv(base + pixels + y * pitch, width, h);
-    return h;
-  }
-};
-
-uint32_t Physical(uint32_t fetch_word1) { return 0xA0000000 + (fetch_word1 & 0x1FFFF000); }
-
-// Where the pixels the GPU shows are. Measured on the PC: 0x1000 past the address in the D3D texture
-// header, for the indices and for the palette (whose slot is then the value at +88 itself): there the
-// pictures are whole and upright, and a test pattern written at the header address showed up 16 rows
-// lower. The cause is not known yet (the 4 KB offset of the 0xE0000000 range is the suspect), so the
-// header address itself, with the slot before, is tried too; only an exact hash match is ever written.
-constexpr uint32_t kPlacements[2] = {0x1000, 0};
-
-Page ReadPage(const uint8_t* base, uint32_t texture, uint32_t shift = kPlacements[0]) {
-  Page page;
-  if (!Plausible(texture)) return page;
-  const uint32_t pddi = Load32(base, texture + kTexturePddi);
-  if (!Plausible(pddi)) return page;
-  const uint32_t d3d = Load32(base, pddi + kPddiD3D);
-  const uint32_t slot = (Load32(base, pddi + kPddiNextPalette) - (shift ? 0 : 1)) & 15;
-  const uint32_t palette = Load32(base, pddi + kPddiPalettes + 4 * slot);
-  if (!Plausible(d3d) || !Plausible(palette)) return page;
-  uint32_t f[3], pf[3];
-  for (int i = 0; i < 3; ++i) {
-    f[i] = Load32(base, d3d + kD3DFetch + 4 * i);
-    pf[i] = Load32(base, palette + kD3DFetch + 4 * i);
-  }
-  page.width = (f[2] & 0x1FFF) + 1;
-  page.height = ((f[2] >> 13) & 0x1FFF) + 1;
-  page.pitch = ((f[0] >> 22) & 0x1FF) * 32;
-  page.pixels = Physical(f[1]) + shift;
-  page.palette = Physical(pf[1]) + shift;
-  const uint32_t palette_width = (pf[2] & 0x1FFF) + 1, palette_height = ((pf[2] >> 13) & 0x1FFF) + 1;
-  page.ok = (f[1] & 63) == kFormat8 && !(f[0] >> 31) && page.width <= 512 && page.height <= 512 &&
-            page.pitch >= page.width && (pf[1] & 63) == kFormat8888 && !(pf[0] >> 31) &&
-            palette_width == 256 && palette_height == 1;
-  return page;
-}
-
-// Writes guest memory after telling the memory watchers, as the game's own writes do.
-void WriteGuest(uint8_t* base, uint32_t address, const uint8_t* data, uint32_t size) {
-  if (auto* memory = rex::system::kernel_memory()) {
-    memory->TriggerPhysicalMemoryCallbacks(rex::thread::global_critical_region::AcquireDirect(), address, size,
-                                           true, false);
-  }
-  std::memcpy(base + address, data, size);
-}
 
 std::mutex g_mutex;
 std::vector<uint32_t> g_fonts;
@@ -202,7 +123,9 @@ bool CheckPage(uint8_t* base, uint32_t font, uint32_t p, const Page& page) {
   return false;
 }
 
-void CheckFonts(uint8_t* base) {
+// buttons: put the Switch pictures in (cott_button_icons). Every live font also goes to the letters added
+// for Portuguese (cott_language.cpp).
+void CheckFonts(uint8_t* base, bool buttons) {
   std::lock_guard<std::mutex> lock(g_mutex);
   for (auto it = g_fonts.begin(); it != g_fonts.end();) {
     const uint32_t font = *it;
@@ -211,6 +134,8 @@ void CheckFonts(uint8_t* base) {
       continue;
     }
     ++it;
+    CottLanguageCheckFont(base, font);
+    if (!buttons) continue;
     const uint32_t pages = Load32(base, font + kFontPageCount), page_array = Load32(base, font + kFontPages);
     if (pages > 256 || !Plausible(page_array)) continue;
     for (uint32_t p = 0; p < pages; ++p) {
@@ -222,7 +147,7 @@ void CheckFonts(uint8_t* base) {
       }
     }
   }
-  for (auto it = g_textures.begin(); it != g_textures.end();) {
+  for (auto it = g_textures.begin(); buttons && it != g_textures.end();) {
     bool shows = false;
     if (Load32(base, it->texture) == kTextureVtable) {
       for (const uint32_t shift : kPlacements) {
@@ -323,6 +248,6 @@ REX_HOOK_RAW(sub_82312458) {
 REX_EXTERN(__imp__sub_82274080);
 REX_HOOK_RAW(sub_82274080) {
   __imp__sub_82274080(ctx, base);
-  if (++g_frames % kCheckEvery != 0 || REXCVAR_GET(cott_button_icons) != "switch") return;
-  CheckFonts(base);
+  if (++g_frames % kCheckEvery != 0) return;
+  CheckFonts(base, REXCVAR_GET(cott_button_icons) == "switch");
 }

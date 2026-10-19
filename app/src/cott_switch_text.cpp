@@ -20,6 +20,8 @@
 //
 // cott_switch_text = true (default) | false.
 
+#include "cott_language.h"
+
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
@@ -137,18 +139,21 @@ bool Reword(uint8_t* p) {
 }  // namespace
 
 // pure3d::TextBibleLoader's reading of one Language (r4: the chunk reader). Returns the Language, or 0 for
-// a language the game doesn't keep.
+// a language the game doesn't keep. Also where the Portuguese translation goes in (cott_language.cpp).
 REX_EXTERN(__imp__sub_823271F8);
 REX_HOOK_RAW(sub_823271F8) {
   __imp__sub_823271F8(ctx, base);
   const uint32_t language = ctx.r3.u32;
+  // The translation first: it finds strings by their English, before any rewording.
+  CottLanguageTranslate(base, language);
   if (!REXCVAR_GET(cott_switch_text) || !Plausible(language) || Load32(base, language) != kLanguageVtable) return;
   const uint32_t count = Load32(base, language + kLanguageCount);
   const uint32_t offsets = Load32(base, language + kLanguageOffsets), text = Load32(base, language + kLanguageText);
   if (count > 100000 || !Plausible(offsets) || !Plausible(text)) return;
   uint32_t changed = 0;
   for (uint32_t i = 0; i < count; ++i) {
-    changed += Reword(base + text + Load32(base, offsets + 4 * i)) ? 1 : 0;
+    // 32-bit sums, as the game does: translated strings (cott_language.cpp) point past the 4 GB wrap.
+    changed += Reword(base + uint32_t(text + (Load32(base, offsets + 4 * i) & ~1u))) ? 1 : 0;
   }
   REXLOG_INFO("[switch text] language {}: {} strings, {} name the Nintendo Switch now",
               int(int8_t(base[language + kLanguageCode])), count, changed);
