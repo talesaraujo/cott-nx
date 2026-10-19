@@ -6,7 +6,8 @@
 //   ('P'), but this game has no texts for it and turns it into English.
 //
 // cott_language = auto (default) | en | fr | de | es | it | pt-BR
-//   auto: the Switch's system language (Portuguese -> pt-BR); on the PC, whatever user_language says.
+//   auto: the Switch's system language (Portuguese -> pt-BR; English for the languages the game does
+//   not have); on the PC, whatever user_language says.
 //   pt-BR: the game runs in English (its voices too, the original dub) and every string with a
 //   translation in translations/pt_BR.txt (built into the executable) shows it instead.
 //
@@ -57,7 +58,7 @@
 
 REXCVAR_DEFINE_STRING(cott_language, "auto", "Game",
                       "Language of the game's texts: auto (the Switch's system language; Portuguese gives "
-                      "pt-BR), en, fr, de, es, it, or pt-BR (Brazilian Portuguese, translated by the port: "
+                      "pt-BR, the languages the game does not have give English), en, fr, de, es, it, or pt-BR (Brazilian Portuguese, translated by the port: "
                       "texts in Portuguese, voices in English)")
     .allowed({"auto", "en", "fr", "de", "es", "it", "pt-BR"})
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -84,10 +85,11 @@ void Store32(uint8_t* base, uint32_t address, uint32_t value) {
 
 // --- The language -------------------------------------------------------------------------------------
 
-// "en", "fr", ... or "pt-BR" for the Switch's system language; "" when it is none of those.
+// The game's language for the Switch's system language: "fr", "de", "es", "it", "pt-BR", or "en" for
+// English and every language the game does not have. "" elsewhere (the PC: user_language decides).
 std::string SystemLanguage() {
 #if REX_PLATFORM_SWITCH
-  std::string out;
+  std::string out = "en";
   if (R_SUCCEEDED(setInitialize())) {
     u64 code = 0;
     SetLanguage language;

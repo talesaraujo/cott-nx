@@ -64,7 +64,8 @@ O idioma do jogo é escolhido pela opção `cott_language`, no `cott.toml` ao la
 cott_language = "en"   # auto (padrão), en, fr, de, es, it ou pt-BR
 ```
 
-- `auto` segue o idioma do Switch. Com o Switch em português, entra o pt-BR.
+- `auto` segue o idioma do Switch: inglês, espanhol, francês, alemão e italiano (com as vozes dubladas do jogo), ou
+  pt-BR com o Switch em português. Qualquer outro idioma do Switch dá inglês.
 - `pt-BR` é a tradução em português do Brasil feita pelo port: textos em português e vozes em inglês, a dublagem
   original. Nenhum idioma do jogo é substituído; com `en`, o jogo fica exatamente como era.
 
