@@ -40,3 +40,6 @@ __pycache__/
 
 # --- Run logs -----------------------------------------------------------------
 logs/
+
+# Homebrew menu icon made from the game's own art (tools/switch/make_icon.py): game data, never committed.
+tools/switch/icon/
