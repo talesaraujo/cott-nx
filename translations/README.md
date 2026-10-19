@@ -10,7 +10,7 @@ várias cópias dos pacotes de texto.
 
 ## Como melhorar a tradução
 
-Você precisa do seu próprio `default.rcf` (veja "Extrair o jogo" no README principal).
+Você precisa do seu próprio `default.rcf` (veja "Extrair o jogo" no [README em português](../README.pt-BR.md#extrair-o-jogo)).
 
 ```sh
 python3 tools/text/export_po.py     # cria translations/work/pt_BR.po: o inglês + a tradução atual
