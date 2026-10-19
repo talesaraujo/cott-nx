@@ -43,3 +43,6 @@ logs/
 
 # Homebrew menu icon made from the game's own art (tools/switch/make_icon.py): game data, never committed.
 tools/switch/icon/
+
+# Translation work files (tools/text/export_po.py): they hold the game's English text.
+translations/work/
