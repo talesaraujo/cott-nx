@@ -54,6 +54,12 @@ The rest of FFmpeg and libmspack is the unmodified upstream source at the commit
 Everything needed to rebuild and relink the NRO with a modified version of either library is in this repository and
 in [docs/building.md](docs/building.md).
 
+## Artwork
+
+| Work | Used for | License |
+|---|---|---|
+| [Xelu's Free Controller & Key Prompts](https://thoseawesomeguys.com/prompts/) by Nicolae "Xelu" Berbece (Those Awesome Guys) | The Switch button pictures in the game's prompts (`app/prompts/switch`) | CC0 (public domain) |
+
 ## Installer page
 
 The [installer page](https://github.com/StevensND/nfsmw-nx-installer) runs WebAssembly builds of the shader translator

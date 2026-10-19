@@ -119,14 +119,14 @@ __attribute__((always_inline)) inline void Butterfly(const Vec8 a[8], Vec8 out[8
 }
 
 inline void Transpose4(v4u& a, v4u& b, v4u& c, v4u& d) {
-  const v4u t0 = __builtin_shuffle(a, b, v4u{0, 4, 1, 5});
-  const v4u t1 = __builtin_shuffle(a, b, v4u{2, 6, 3, 7});
-  const v4u t2 = __builtin_shuffle(c, d, v4u{0, 4, 1, 5});
-  const v4u t3 = __builtin_shuffle(c, d, v4u{2, 6, 3, 7});
-  a = __builtin_shuffle(t0, t2, v4u{0, 1, 4, 5});
-  b = __builtin_shuffle(t0, t2, v4u{2, 3, 6, 7});
-  c = __builtin_shuffle(t1, t3, v4u{0, 1, 4, 5});
-  d = __builtin_shuffle(t1, t3, v4u{2, 3, 6, 7});
+  const v4u t0 = __builtin_shufflevector(a, b, 0, 4, 1, 5);
+  const v4u t1 = __builtin_shufflevector(a, b, 2, 6, 3, 7);
+  const v4u t2 = __builtin_shufflevector(c, d, 0, 4, 1, 5);
+  const v4u t3 = __builtin_shufflevector(c, d, 2, 6, 3, 7);
+  a = __builtin_shufflevector(t0, t2, 0, 1, 4, 5);
+  b = __builtin_shufflevector(t0, t2, 2, 3, 6, 7);
+  c = __builtin_shufflevector(t1, t3, 0, 1, 4, 5);
+  d = __builtin_shufflevector(t1, t3, 2, 3, 6, 7);
 }
 
 inline void Transpose8(Vec8 m[8]) {
