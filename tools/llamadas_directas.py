@@ -1,21 +1,19 @@
-# nfsmw - direct calls to game functions that have no hook.
+# cott - direct calls to game functions that have no hook (from nfsmw-nx, same tool).
 #
-# With GCC every recompiled function sub_X is a weak alias of __imp__sub_X (DEFINE_REX_FUNC, nfsmw_pch.h),
+# With GCC every recompiled function sub_X is a weak alias of __imp__sub_X (DEFINE_REX_FUNC, cott_pch.h),
 # so that one of our REX_HOOK_RAW(sub_X) replaces it at link time. The codegen always calls sub_X, and the
 # compiler cannot inline a weak function into another (a hook could replace it): not within the same file
 # and not with LTO. This step changes `sub_X(ctx, base);` into `__imp__sub_X(ctx, base);` when sub_X has no
 # hook, which is exactly the same function, but can now be inlined.
 #
-# Any 82xxxxxx address that appears in the app or SDK sources or in the toml files counts as hooked (the
-# D3D trace builds its hooks with sub_##addr). That is slightly more than needed and safe; it is also
-# checked against the sub_ symbols the compiled objects really define (--comprobar-objetos).
+# Any 82xxxxxx address that appears in the app or SDK sources or in the toml files counts as hooked (hooks
+# can be built with sub_##addr). That is slightly more than needed and safe.
 #
-# It does not touch nfsmw_init.cpp or nfsmw_register.cpp: the dispatch table for indirect calls still
+# It does not touch cott_init.cpp or cott_register.cpp: the dispatch table for indirect calls still
 # points to sub_X and sees the hooks. It has to be run again after every codegen.
 #
-# Usage: py tools/llamadas_directas.py [--deshacer] [--gen <generated folder>] [--enganchadas <list>]
-#   --gen and --enganchadas: for the tree of another edition (tools/editions/crear_arbol.py), with the
-#   list of hooked addresses of the Spanish edition already translated.
+# Usage: python3 tools/llamadas_directas.py [--deshacer] [--gen <generated folder>] [--enganchadas <list>]
+#   tools/switch/build_nro.sh runs it before every build; already direct calls are left alone.
 import os
 import re
 import sys
@@ -24,7 +22,7 @@ RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GEN = os.path.join(RAIZ, 'app', 'generated', 'default')
 FUENTES = [os.path.join(RAIZ, 'app', 'src'), os.path.join(RAIZ, 'sdk', 'src'),
            os.path.join(RAIZ, 'sdk', 'include'), os.path.join(RAIZ, 'app', 'overrides.toml'),
-           os.path.join(RAIZ, 'app', 'huecos.toml'), os.path.join(RAIZ, 'app', 'nfsmw_manifest.toml'),
+           os.path.join(RAIZ, 'app', 'cott_manifest.toml'),
            os.path.join(RAIZ, 'app', 'CMakeLists.txt')]
 
 
@@ -58,7 +56,7 @@ def main():
     cambiadas = 0
     ficheros = 0
     for f in sorted(os.listdir(gen)):
-        if not (f.startswith('nfsmw_recomp.') and f.endswith('.cpp')):
+        if not (f.startswith('cott_recomp.') and f.endswith('.cpp')):
             continue
         ruta = os.path.join(gen, f)
         texto = open(ruta, encoding='utf-8').read()
@@ -69,6 +67,13 @@ def main():
                 return m.group(0) if 'sub_' + m.group(1) in con_gancho else '__imp__sub_%s(ctx, base);' % m.group(1)
             nuevo = llamada.sub(cambiar, texto)
             n = len(llamada.findall(texto)) - len(llamada.findall(nuevo))
+            # A function hooked after an earlier run: its calls go back through sub_X, so they reach the
+            # hook. The codegen never writes __imp__ calls itself, so every one here is from this tool.
+            nuevo, devueltas = directa.subn(
+                lambda m: 'sub_%s(ctx, base);' % m.group(1) if 'sub_' + m.group(1) in con_gancho else m.group(0),
+                nuevo)
+            devueltas = sum(1 for m in directa.finditer(texto) if 'sub_' + m.group(1) in con_gancho)
+            n += devueltas
         if nuevo != texto:
             open(ruta, 'w', encoding='utf-8', newline='\n').write(nuevo)
             ficheros += 1

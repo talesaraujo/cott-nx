@@ -17,6 +17,10 @@ IMAGE=${IMAGE:-docker.io/devkitpro/devkita64:latest}
 BUILD=${BUILD:-$ROOT/app/out/switch}
 JOBS=${JOBS:-6}
 
+# Calls between game functions without a hook made direct, so LTO can inline them. Needed after every
+# codegen; does nothing when they already are.
+python3 "$ROOT/tools/llamadas_directas.py"
+
 podman run --rm \
   -v "$ROOT:$ROOT:Z" -v "$NVK_SDK:$NVK_SDK:ro,Z" -w "$ROOT" \
   -e ROOT="$ROOT" -e NVK_SDK="$NVK_SDK" -e BUILD="$BUILD" -e JOBS="$JOBS" \

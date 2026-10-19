@@ -13,6 +13,7 @@ include(generated/rexglue.cmake)
 # Sources
 set(COTT_SOURCES
     src/main.cpp
+    src/cott_ring_wait.cpp
 )
 
 if(WIN32)
@@ -37,8 +38,19 @@ endif()
 
 # Nintendo Switch: cott.nro next to the ELF. On the SD card it goes in sdmc:/switch/cott-nx/ with the
 # extracted disc beside it in game_root/ (src/cott_app.h looks for it there).
-# First bring-up: no LTO, PGO or function ordering yet (nfsmw-nx's performance options come later).
 if(REXGLUE_PLATFORM_SWITCH)
+    # LTO on the game code and ours (not on the SDK libraries), as in nfsmw-nx. Together with
+    # tools/llamadas_directas.py (calls to functions without a hook go to __imp__, which is not weak) the
+    # compiler can inline small game functions across files. Two LTO jobs: this machine has 15 GB of RAM.
+    option(COTT_LTO "LTO on the game code and the app (Switch)" ON)
+    if(COTT_LTO)
+        foreach(target cott_recomp cott)
+            if(TARGET ${target})
+                target_compile_options(${target} PRIVATE -flto -fno-fat-lto-objects)
+            endif()
+        endforeach()
+        target_link_options(cott PRIVATE -flto=2 -flto-partition=balanced)
+    endif()
     # Homebrew menu icon: a 256x256 JPEG, as elf2nro expects. Not distributed; without it the NRO gets
     # libnx's default icon.
     set(COTT_ICON "${CMAKE_CURRENT_SOURCE_DIR}/../tools/switch/icon/cott_icon.jpg")

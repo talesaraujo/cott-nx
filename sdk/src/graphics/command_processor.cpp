@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
@@ -217,6 +218,7 @@ void CommandProcessor::WorkerThreadMain() {
     uint32_t write_ptr_index = write_ptr_index_.load();
     if (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index) {
       SCOPE_profile_cpu_i("gpu", "rex::graphics::CommandProcessor::Stall");
+      const auto idle_start = std::chrono::steady_clock::now();
       // We've run out of commands to execute.
       // We spin here waiting for new ones, as the overhead of waiting on our
       // event is too high.
@@ -244,6 +246,10 @@ void CommandProcessor::WorkerThreadMain() {
       } while (worker_running_ && pending_fns_.empty() &&
                (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
       ReturnFromWait();
+      ring_idle_ns_.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - idle_start)
+                                           .count()),
+                              std::memory_order_relaxed);
       if (!worker_running_ || !pending_fns_.empty()) {
         continue;
       }
@@ -251,7 +257,13 @@ void CommandProcessor::WorkerThreadMain() {
     assert_true(read_ptr_index_ != write_ptr_index);
 
     // Execute. Note that we handle wraparound transparently.
+    const auto execute_start = std::chrono::steady_clock::now();
     read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
+    ring_execute_ns_.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            std::chrono::steady_clock::now() - execute_start)
+                                            .count()),
+                               std::memory_order_relaxed);
+    ring_batches_.fetch_add(1, std::memory_order_relaxed);
 
     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
     //     that many indices.
@@ -340,6 +352,7 @@ void CommandProcessor::EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_s
 }
 
 void CommandProcessor::UpdateWritePointer(uint32_t value) {
+  ring_kicks_.fetch_add(1, std::memory_order_relaxed);
   write_ptr_index_ = value;
   write_ptr_index_event_->Set();
 }

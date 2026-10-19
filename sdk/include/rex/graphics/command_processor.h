@@ -277,6 +277,14 @@ class CommandProcessor {
   std::unique_ptr<rex::thread::Event> write_ptr_index_event_;
   std::atomic<uint32_t> write_ptr_index_;
 
+  // How the game and this thread share the ring, for the native renderer's report: write pointer
+  // updates from the game (kicks), batches executed, and the time this thread spends executing them
+  // and waiting for new ones. Only the worker thread writes the times; the report reads them.
+  std::atomic<uint64_t> ring_kicks_{0};
+  std::atomic<uint64_t> ring_batches_{0};
+  std::atomic<uint64_t> ring_execute_ns_{0};
+  std::atomic<uint64_t> ring_idle_ns_{0};
+
   // Some titles submit writes beyond the emulated register file range in PM4
   // packets. Preserve these values so dependent packet logic can still observe
   // them instead of dropping the write entirely.

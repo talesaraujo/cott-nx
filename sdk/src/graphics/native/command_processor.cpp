@@ -705,6 +705,19 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                 gpu_frames_ ? gpu_gap_ns_ / gpu_frames_ * 1e-6 : 0.0,
                 swaps ? record_ns_ / swaps * 1e-6 : 0.0, swaps ? slot_wait_ns_ / swaps * 1e-6 : 0.0,
                 timestamp_scale_);
+    {
+      // The ring between the game and this thread: if both wait a lot, they are taking turns.
+      const uint64_t kicks = ring_kicks_.exchange(0, std::memory_order_relaxed);
+      const uint64_t batches = ring_batches_.exchange(0, std::memory_order_relaxed);
+      const uint64_t execute_ns = ring_execute_ns_.exchange(0, std::memory_order_relaxed);
+      const uint64_t idle_ns = ring_idle_ns_.exchange(0, std::memory_order_relaxed);
+      REXGPU_INFO("[native] ring per frame: {:.1f} kicks, {:.1f} batches, executing {:.1f} ms, "
+                  "waiting for the game {:.1f} ms; ring {} KB at {:08X}",
+                  swaps ? double(kicks) / swaps : 0.0, swaps ? double(batches) / swaps : 0.0,
+                  swaps ? execute_ns / double(swaps) * 1e-6 : 0.0,
+                  swaps ? idle_ns / double(swaps) * 1e-6 : 0.0, primary_buffer_size_ >> 10,
+                  primary_buffer_ptr_);
+    }
     gpu_ns_ = record_ns_ = slot_wait_ns_ = gpu_gap_ns_ = 0.0;
     for (double& ns : gpu_kind_ns_) ns = 0.0;
     gpu_frames_ = 0;
