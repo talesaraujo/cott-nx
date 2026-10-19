@@ -31,6 +31,9 @@ build/
 *.log
 *.err
 
+# --- Personal agent notes (see CLAUDE.md) ------------------------------------
+CLAUDE.local.md
+
 # --- Tools --------------------------------------------------------------------
 __pycache__/
 *.pyc
