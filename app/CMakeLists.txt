@@ -14,6 +14,7 @@ include(generated/rexglue.cmake)
 set(COTT_SOURCES
     src/main.cpp
     src/cott_ring_wait.cpp
+    src/cott_bink.cpp
 )
 
 if(WIN32)
