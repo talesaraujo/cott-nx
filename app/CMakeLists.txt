@@ -16,6 +16,7 @@ set(COTT_SOURCES
     src/cott_ring_wait.cpp
     src/cott_bink.cpp
     src/cott_prompt_icons.cpp
+    src/cott_switch_text.cpp
 )
 
 if(WIN32)
