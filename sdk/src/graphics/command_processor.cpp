@@ -1115,7 +1115,14 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
           // User wants it fast and dangerous.
           rex::thread::MaybeYield();
         } else {
+#if REX_PLATFORM_SWITCH
+          // Checked every 100 us, not after whole milliseconds: during the intro's Bink movies the
+          // ring waits here for memory the game writes (10% of this thread's time), and every late
+          // wake-up delayed the frame.
+          rex::thread::Sleep(std::chrono::microseconds(100));
+#else
           rex::thread::Sleep(std::chrono::milliseconds(wait / 0x100));
+#endif
         }
         rex::thread::SyncMemory();
         ReturnFromWait();

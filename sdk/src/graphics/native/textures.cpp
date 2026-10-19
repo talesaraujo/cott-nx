@@ -368,22 +368,40 @@ bool NativeTextures::Upload(VkCommandBuffer cb, const xenos::xe_gpu_texture_fetc
     if (!out) {
       return false;
     }
-    for (uint32_t y = 0; y < blocks_y; ++y) {
-      for (uint32_t x = 0; x < blocks_x; ++x) {
-        const uint32_t block = source + uint32_t(fetch.tiled ? texture_util::GetTiledOffset2D(
-                                                                   int32_t(x + offset_x),
-                                                                   int32_t(y + offset_y),
-                                                                   pitch_blocks, host.bytes_log2)
-                                                             : (y + offset_y) * row_pitch_bytes +
-                                                                   (x + offset_x) * bytes);
-        if (!endian_xor) {
-          std::memcpy(out, physical + (block & 0x1FFFFFFF), bytes);
-        } else {
-          for (uint32_t i = 0; i < bytes; ++i) {
-            out[i] = physical[((block + i) ^ endian_xor) & 0x1FFFFFFF];
-          }
+    // Copied a run of blocks at a time. In a 32x32 Xenos tile, the blocks from a multiple of `run` on
+    // (8, but at most 16 bytes) are consecutive in memory, and so is a row of a linear texture. Block by
+    // block, an 8-bit 1280x720 plane of the intro's Bink movies was 921,600 calls to GetTiledOffset2D
+    // and memcpy: about 25 ms of the command thread per frame for three planes.
+    const uint32_t run = std::min(8u, 16u >> host.bytes_log2);
+    auto copy_run = [&](uint32_t address, uint32_t count) {
+      const uint32_t n = count * bytes;
+      const uint8_t* from = physical + (address & 0x1FFFFFFF);
+      // Fixed sizes for the tiled runs, so each is one or two loads and stores, not a call.
+      if (!endian_xor && n == 16) {
+        std::memcpy(out, from, 16);
+      } else if (!endian_xor && n == 8) {
+        std::memcpy(out, from, 8);
+      } else if (!endian_xor) {
+        std::memcpy(out, from, n);
+      } else {
+        for (uint32_t i = 0; i < n; ++i) {
+          out[i] = physical[((address + i) ^ endian_xor) & 0x1FFFFFFF];
         }
-        out += bytes;
+      }
+      out += n;
+    };
+    for (uint32_t y = 0; y < blocks_y; ++y) {
+      if (!fetch.tiled) {
+        copy_run(source + (y + offset_y) * row_pitch_bytes + offset_x * bytes, blocks_x);
+        continue;
+      }
+      for (uint32_t x = 0; x < blocks_x;) {
+        const uint32_t tx = x + offset_x;
+        const uint32_t count = (tx % run == 0 && x + run <= blocks_x) ? run : 1;
+        copy_run(source + uint32_t(texture_util::GetTiledOffset2D(int32_t(tx), int32_t(y + offset_y),
+                                                                  pitch_blocks, host.bytes_log2)),
+                 count);
+        x += count;
       }
     }
     VkBufferImageCopy copy = {};
