@@ -6,7 +6,7 @@ Port nativo e não oficial da versão de Xbox 360 de **Crash of the Titans** (20
 
 > [!WARNING]
 > **Em desenvolvimento.** O jogo roda inteiro no Switch e é jogável, mas ainda há trabalho de desempenho e
-> acabamento. Este repositório é privado e serve de base de trabalho.
+> acabamento.
 
 Não é um emulador. O código PowerPC do `default.xex` do jogo é recompilado estaticamente para C++ com
 [ReXGlue](https://github.com/rexglue/rexglue-sdk) e compilado para o Switch, seguindo o caminho aberto pelo
